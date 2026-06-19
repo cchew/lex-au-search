@@ -10,8 +10,10 @@ COLLECTION = "legislation"
 
 
 def configure_client(client: QdrantClient) -> QdrantClient:
-    client.set_model(DENSE_MODEL)
-    client.set_sparse_model(SPARSE_MODEL)
+    if not getattr(client, "_model_name", None):
+        client.set_model(DENSE_MODEL)
+    if not getattr(client, "_sparse_model_name", None):
+        client.set_sparse_model(SPARSE_MODEL)
     return client
 
 

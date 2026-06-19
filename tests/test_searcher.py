@@ -3,7 +3,7 @@ from qdrant_client import QdrantClient
 
 from lexausearch.indexer import Indexer
 from lexausearch.searcher import Searcher
-from lexausearch.models import SearchResult
+from lexausearch.models import SearchResult, Chunk
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +42,6 @@ def test_search_limit_respected(indexed_searcher):
 
 
 def test_search_act_filter_excludes_other_acts(privacy_chunks):
-    from lexausearch.models import Chunk
     extra_chunk = Chunk(
         act_name="Fair Work Act 2009",
         frbr_uri="/akn/au/act/2009/28/eng@2026-01-01",
@@ -56,4 +55,5 @@ def test_search_act_filter_excludes_other_acts(privacy_chunks):
     indexer.upsert(privacy_chunks + [extra_chunk])
     searcher = Searcher(client)
     results = searcher.search("information", limit=5, act="Fair Work Act 2009")
+    assert len(results) > 0
     assert all(r.chunk.act_name == "Fair Work Act 2009" for r in results)
