@@ -10,10 +10,6 @@ from lexausearch.models import Chunk
 AKN_NS = "http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
 
 
-def _xml_bytes(xml_str: str) -> bytes:
-    return xml_str.encode()
-
-
 def test_chunk_xml_returns_one_chunk_per_section(tmp_path):
     from tests.conftest import PRIVACY_ACT_XML
     xml_file = tmp_path / "privacy-act-1988.xml"

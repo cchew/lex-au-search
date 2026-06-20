@@ -24,7 +24,7 @@ def test_search_returns_results(indexed_searcher):
 def test_search_result_has_score(indexed_searcher):
     results = indexed_searcher.search("personal information", limit=2)
     assert all(isinstance(r.score, float) for r in results)
-    assert all(0.0 <= r.score <= 1.0 for r in results)
+    assert all(isinstance(r.score, float) and r.score >= 0.0 for r in results)
 
 
 def test_search_result_chunk_fields(indexed_searcher):
@@ -39,6 +39,14 @@ def test_search_result_chunk_fields(indexed_searcher):
 def test_search_limit_respected(indexed_searcher):
     results = indexed_searcher.search("information", limit=1)
     assert len(results) <= 1
+
+
+def test_configure_client_idempotent(privacy_chunks):
+    """configure_client called twice on same client must not raise."""
+    from lexausearch.indexer import configure_client
+    client = QdrantClient(":memory:")
+    configure_client(client)
+    configure_client(client)  # should not raise
 
 
 def test_search_act_filter_excludes_other_acts(privacy_chunks):

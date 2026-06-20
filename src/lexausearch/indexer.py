@@ -9,11 +9,15 @@ SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION = "legislation"
 
 
+_configured_clients: set[int] = set()
+
+
 def configure_client(client: QdrantClient) -> QdrantClient:
-    if not getattr(client, "_model_name", None):
+    cid = id(client)
+    if cid not in _configured_clients:
         client.set_model(DENSE_MODEL)
-    if not getattr(client, "_sparse_model_name", None):
         client.set_sparse_model(SPARSE_MODEL)
+        _configured_clients.add(cid)
     return client
 
 
