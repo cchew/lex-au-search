@@ -42,4 +42,5 @@ class Indexer:
                 }
                 for c in chunks
             ],
+            batch_size=32,
         )
