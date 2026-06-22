@@ -2,7 +2,7 @@
 
 Hybrid semantic search over Australian Commonwealth legislation -- Layer 2 of the AU Legislative Intelligence Stack.
 
-**Status: v0.1.0** -- local-first, no Docker, no external APIs.
+**Status: v0.1.0** — local-first, no Docker, no external APIs.
 
 ## Stack position
 
@@ -15,6 +15,10 @@ Agent demo             -- NL query -> attributed answer (future)
 
 Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
 
+## Versions
+
+- **v0.1.0** — 2026-06-20: local hybrid search (dense + BM25), FastAPI, MCP stdio.
+
 ## Install
 
 ```bash
@@ -24,7 +28,7 @@ pip install -e ".[dev]"
 
 ## Before full ingest
 
-The ingest command embeds ~2900 sections using a local ONNX model (~270 MB, downloaded once to `~/.cache/fastembed/`). It takes roughly 60-90 minutes on Apple Silicon and uses significant RAM while running.
+The ingest command embeds sections using a local ONNX model (~270 MB, downloaded once to `~/.cache/fastembed/`). With the current 11-Act corpus (~4000+ sections after v0.2.0 rebuild) it takes roughly 60-90 minutes on Apple Silicon and uses significant RAM while running.
 
 **Checklist before starting:**
 
@@ -114,4 +118,4 @@ Response:
 
 - Schedule content (e.g. Privacy Act Schedule 1 -- APPs) not indexed (lex-au v0.1.0 gap; resolved in lex-au v0.2.0)
 - No auth on HTTP API (local use only)
-- Section-level citations only; subsection-level requires lex-au v0.1.1 + re-ingest
+- Section-level citations only; subsection-level requires lex-au v0.2.0 + re-ingest
