@@ -13,6 +13,8 @@ Layer 3: ClauseKit     -- rule extraction JSON
 Agent demo             -- NL query -> attributed answer (future)
 ```
 
+Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
+
 ## Install
 
 ```bash
@@ -110,6 +112,6 @@ Response:
 
 ## Known limits (v0.1.0)
 
-- Schedule content (e.g. Privacy Act Schedule 1 -- APPs) not indexed (lex-au v0.1.0 gap; resolved in lex-au v0.1.1)
+- Schedule content (e.g. Privacy Act Schedule 1 -- APPs) not indexed (lex-au v0.1.0 gap; resolved in lex-au v0.2.0)
 - No auth on HTTP API (local use only)
 - Section-level citations only; subsection-level requires lex-au v0.1.1 + re-ingest
