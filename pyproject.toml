@@ -13,6 +13,7 @@ dependencies = [
     "lxml>=5.3",
     "qdrant-client[fastembed]>=1.9",
     "fastapi>=0.115",
+    "fastmcp>=2.0",
     "uvicorn>=0.30",
     "mcp>=1.0",
     "click>=8.1",

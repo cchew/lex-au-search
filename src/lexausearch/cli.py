@@ -10,7 +10,7 @@ from lexausearch.chunker import chunk_corpus
 from lexausearch.indexer import Indexer
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
-from lexausearch.mcp import get_storage_path, run_mcp_server
+from lexausearch.mcp import run_mcp_server
 
 
 @click.group()
@@ -64,7 +64,4 @@ def serve(storage_dir: Path, port: int, host: str) -> None:
 @cli.command()
 def mcp() -> None:
     """Run MCP stdio server for Claude Code integration."""
-    storage = get_storage_path()
-    client = QdrantClient(path=str(storage))
-    searcher = Searcher(client)
-    asyncio.run(run_mcp_server(searcher))
+    asyncio.run(run_mcp_server())

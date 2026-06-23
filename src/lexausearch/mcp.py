@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Callable
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp import types
+from fastmcp import FastMCP
+from qdrant_client import QdrantClient
 
+from lexausearch.api import create_app
 from lexausearch.models import format_results
 from lexausearch.searcher import Searcher
 
@@ -23,6 +24,7 @@ def get_storage_path() -> Path:
 
 
 def make_search_tool_handler(searcher: Searcher) -> Callable:
+    """Return a callable search handler for direct use in tests and legacy wiring."""
     def handler(query: str, limit: int = 5, act: str | None = None) -> str:
         results = searcher.search(query, limit=limit, act=act)
         if not results:
@@ -31,55 +33,10 @@ def make_search_tool_handler(searcher: Searcher) -> Callable:
     return handler
 
 
-async def run_mcp_server(searcher: Searcher) -> None:
-    server = Server("lex-au-search")
-    search_handler = make_search_tool_handler(searcher)
-
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name="search_legislation",
-                description=(
-                    "Search Australian Commonwealth legislation by topic or question. "
-                    "Returns relevant sections with FRBR citations and relevance scores."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Natural language question or topic to search for",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "default": 5,
-                            "description": "Maximum number of sections to return",
-                        },
-                        "act": {
-                            "type": "string",
-                            "description": "Optional: restrict search to a specific Act by name (e.g. 'Privacy Act 1988')",
-                        },
-                    },
-                    "required": ["query"],
-                },
-            )
-        ]
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-        if name == "search_legislation":
-            output = search_handler(
-                query=arguments["query"],
-                limit=arguments.get("limit", 5),
-                act=arguments.get("act"),
-            )
-            return [types.TextContent(type="text", text=output)]
-        raise ValueError(f"Unknown tool: {name}")
-
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+async def run_mcp_server() -> None:
+    storage = get_storage_path()
+    client = QdrantClient(path=str(storage))
+    searcher = Searcher(client)
+    app = create_app(searcher, client)
+    mcp = FastMCP.from_fastapi(app, name="lex-au-search")
+    await mcp.run_async(transport="stdio")

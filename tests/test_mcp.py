@@ -3,7 +3,6 @@ import pytest
 from unittest.mock import MagicMock
 
 from lexausearch.models import Chunk, SearchResult, format_results
-from lexausearch.mcp import make_search_tool_handler
 
 
 def _make_result(eid: str, score: float) -> SearchResult:
@@ -22,7 +21,45 @@ def _make_result(eid: str, score: float) -> SearchResult:
     )
 
 
+def _make_searcher(results=None):
+    searcher = MagicMock()
+    searcher.search.return_value = results or [
+        SearchResult(
+            chunk=Chunk(
+                act_name="Privacy Act 1988",
+                frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
+                eid="sec-6", provision_num="6", provision_type="section",
+                heading="Definitions", text="personal information", refs=[],
+            ),
+            score=0.9,
+        )
+    ]
+    return searcher
+
+
+# --- New tests (Task 7) ---
+
+def test_mcp_module_importable():
+    import lexausearch.mcp  # must not raise
+
+
+def test_get_storage_path_raises_without_env(monkeypatch):
+    monkeypatch.delenv("LEXAU_SEARCH_STORAGE", raising=False)
+    from lexausearch.mcp import get_storage_path
+    with pytest.raises(SystemExit):
+        get_storage_path()
+
+
+def test_get_storage_path_returns_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEXAU_SEARCH_STORAGE", str(tmp_path))
+    from lexausearch.mcp import get_storage_path
+    assert get_storage_path() == tmp_path
+
+
+# --- Existing tests (preserved) ---
+
 def test_search_tool_output_contains_section_reference():
+    from lexausearch.mcp import make_search_tool_handler
     mock_searcher = MagicMock()
     mock_searcher.search.return_value = [_make_result("sec-3", 0.85)]
     handler = make_search_tool_handler(mock_searcher)
@@ -32,6 +69,7 @@ def test_search_tool_output_contains_section_reference():
 
 
 def test_search_tool_output_contains_score():
+    from lexausearch.mcp import make_search_tool_handler
     mock_searcher = MagicMock()
     mock_searcher.search.return_value = [_make_result("sec-3", 0.85)]
     handler = make_search_tool_handler(mock_searcher)
@@ -40,6 +78,7 @@ def test_search_tool_output_contains_score():
 
 
 def test_search_tool_passes_act_filter():
+    from lexausearch.mcp import make_search_tool_handler
     mock_searcher = MagicMock()
     mock_searcher.search.return_value = []
     handler = make_search_tool_handler(mock_searcher)
