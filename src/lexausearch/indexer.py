@@ -15,9 +15,6 @@ SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
 
-# Backward-compat alias: searcher.py imports COLLECTION until Task 5.
-COLLECTION = COLLECTION_ACTS
-
 _configured_clients: set[int] = set()
 
 _QUANT_CONFIG = ScalarQuantization(
@@ -128,34 +125,3 @@ class Indexer:
             batch_size=32,
         )
 
-    def upsert(self, chunks: list[Chunk]) -> None:
-        """Backward-compat wrapper. Stores into COLLECTION_ACTS ("legislation").
-
-        Preserved so test_searcher.py and test_api.py continue to pass until
-        Task 5 migrates searcher.py to COLLECTION_SECTIONS.
-        """
-        if not chunks:
-            return
-        _ensure_collection(self._client, COLLECTION_ACTS)
-        _create_payload_indexes(
-            self._client, COLLECTION_ACTS,
-            ["act_name", "frbr_uri", "provision_type"],
-        )
-        self._client.add(
-            collection_name=COLLECTION_ACTS,
-            documents=["search_document: " + c.text for c in chunks],
-            metadata=[
-                {
-                    "act_name": c.act_name,
-                    "frbr_uri": c.frbr_uri,
-                    "eid": c.eid,
-                    "provision_num": c.provision_num,
-                    "provision_type": c.provision_type,
-                    "heading": c.heading,
-                    "text": c.text,
-                    "refs": c.refs,
-                }
-                for c in chunks
-            ],
-            batch_size=32,
-        )

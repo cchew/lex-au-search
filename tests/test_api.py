@@ -10,7 +10,7 @@ from lexausearch.searcher import Searcher
 @pytest.fixture(scope="module")
 def api_client(privacy_chunks):
     client = QdrantClient(":memory:")
-    Indexer(client).upsert(privacy_chunks)
+    Indexer(client).upsert_chunks(privacy_chunks)
     searcher = Searcher(client)
     app = create_app(searcher)
     return TestClient(app)

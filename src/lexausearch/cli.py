@@ -39,7 +39,7 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
     click.echo(f"  {len(chunks)} sections found across all Acts.")
     click.echo(f"Indexing into {storage_dir} ...")
     client = QdrantClient(path=str(storage_dir))
-    Indexer(client).upsert(chunks)
+    Indexer(client).upsert_chunks(chunks)
     click.echo(f"Done. {len(chunks)} chunks indexed.")
 
 
