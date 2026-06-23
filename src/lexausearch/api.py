@@ -51,6 +51,7 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
 
     @app.get(
         "/legislation/{act_name}",
+        operation_id="get_act_metadata",
         description="Retrieve Act-level metadata by name (e.g. 'Privacy Act 1988').",
     )
     def get_act(act_name: str) -> dict:
@@ -77,6 +78,7 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
 
     @app.get(
         "/legislation/{act_name}/sections",
+        operation_id="get_act_sections",
         description="Retrieve all indexed provisions for an Act, sorted by eId.",
     )
     def get_sections(act_name: str) -> dict:
@@ -104,6 +106,7 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
 
     @app.get(
         "/legislation/{act_name}/text",
+        operation_id="get_act_text",
         description="Full Act text concatenated in provision order (plain text).",
     )
     def get_text(act_name: str) -> Response:
