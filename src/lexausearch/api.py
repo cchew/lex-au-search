@@ -1,16 +1,37 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+import re
 
+from fastapi import FastAPI, HTTPException, Response
+from qdrant_client import QdrantClient, models
+
+from lexausearch.indexer import COLLECTION_ACTS, COLLECTION_SECTIONS
 from lexausearch.searcher import Searcher
 
 
-def create_app(searcher: Searcher) -> FastAPI:
-    app = FastAPI(title="lex-au-search", version="0.1.0")
+def _eid_sort_key(eid: str) -> tuple[int, ...]:
+    """Natural sort key for eIds: extract all digit sequences as ints."""
+    return tuple(int(n) for n in re.findall(r'\d+', eid))
 
-    @app.get("/search")
-    def search(q: str, limit: int = 10, act: str | None = None) -> dict:
-        results = searcher.search(q, limit=limit, act=act)
+
+def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
+    app = FastAPI(title="lex-au-search", version="0.3.0")
+
+    @app.get(
+        "/search",
+        operation_id="search_legislation",
+        description=(
+            "Search Australian Commonwealth legislation by topic or question. "
+            "Returns relevant sections and schedule clauses with FRBR citations."
+        ),
+    )
+    def search(
+        q: str,
+        limit: int = 10,
+        act: str | None = None,
+        provision_type: str | None = None,
+    ) -> dict:
+        results = searcher.search(q, limit=limit, act=act, provision_type=provision_type)
         return {
             "results": [
                 {
@@ -21,11 +42,81 @@ def create_app(searcher: Searcher) -> FastAPI:
                     "provision_type": r.chunk.provision_type,
                     "heading": r.chunk.heading,
                     "text": r.chunk.text,
-                    "refs": r.chunk.refs,
+                    "refs": [ref for ref in r.chunk.refs if not ref.startswith("unresolved:")],
                     "score": r.score,
                 }
                 for r in results
             ]
         }
+
+    @app.get(
+        "/legislation/{act_name}",
+        description="Retrieve Act-level metadata by name (e.g. 'Privacy Act 1988').",
+    )
+    def get_act(act_name: str) -> dict:
+        results = client.scroll(
+            collection_name=COLLECTION_ACTS,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="act_name", match=models.MatchValue(value=act_name))]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        points = results[0]
+        if not points:
+            raise HTTPException(status_code=404, detail=f"Act not found: {act_name}")
+        payload = points[0].payload
+        return {
+            "act_name": payload["act_name"],
+            "frbr_uri": payload["frbr_uri"],
+            "year": payload["year"],
+            "as_at_date": payload.get("as_at_date", ""),
+            "section_count": payload.get("section_count", 0),
+            "schedule_clause_count": payload.get("schedule_clause_count", 0),
+        }
+
+    @app.get(
+        "/legislation/{act_name}/sections",
+        description="Retrieve all indexed provisions for an Act, sorted by eId.",
+    )
+    def get_sections(act_name: str) -> dict:
+        results = client.scroll(
+            collection_name=COLLECTION_SECTIONS,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="act_name", match=models.MatchValue(value=act_name))]
+            ),
+            limit=1000,
+            with_payload=True,
+        )
+        points = sorted(results[0], key=lambda p: _eid_sort_key(p.payload.get("eid", "")))
+        return {
+            "chunks": [
+                {
+                    "eid": p.payload["eid"],
+                    "provision_num": p.payload["provision_num"],
+                    "provision_type": p.payload["provision_type"],
+                    "heading": p.payload.get("heading"),
+                    "text": p.payload["text"],
+                }
+                for p in points
+            ]
+        }
+
+    @app.get(
+        "/legislation/{act_name}/text",
+        description="Full Act text concatenated in provision order (plain text).",
+    )
+    def get_text(act_name: str) -> Response:
+        results = client.scroll(
+            collection_name=COLLECTION_SECTIONS,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="act_name", match=models.MatchValue(value=act_name))]
+            ),
+            limit=1000,
+            with_payload=True,
+        )
+        points = sorted(results[0], key=lambda p: _eid_sort_key(p.payload.get("eid", "")))
+        text = "\n\n".join(p.payload["text"] for p in points)
+        return Response(content=text, media_type="text/plain")
 
     return app

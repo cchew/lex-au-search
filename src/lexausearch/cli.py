@@ -57,7 +57,7 @@ def serve(storage_dir: Path, port: int, host: str) -> None:
     import uvicorn
     client = QdrantClient(path=str(storage_dir))
     searcher = Searcher(client)
-    app = create_app(searcher)
+    app = create_app(searcher, client)
     uvicorn.run(app, host=host, port=port)
 
 
