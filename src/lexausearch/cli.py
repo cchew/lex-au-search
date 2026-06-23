@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from pathlib import Path
 
 import click
@@ -8,9 +9,26 @@ from qdrant_client import QdrantClient
 
 from lexausearch.chunker import chunk_corpus
 from lexausearch.indexer import Indexer
+from lexausearch.models import ActRecord
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
 from lexausearch.mcp import run_mcp_server
+
+
+def _year_from_frbr_uri(frbr_uri: str) -> int:
+    # /akn/au/act/1988/119/eng@...  →  1988
+    parts = frbr_uri.split("/")
+    try:
+        return int(parts[4])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _as_at_from_frbr_uri(frbr_uri: str) -> str:
+    # /akn/au/act/1988/119/eng@2026-01-01  →  "2026-01-01"
+    if "@" in frbr_uri:
+        return frbr_uri.split("@")[-1].split("/")[0]
+    return ""
 
 
 @click.group()
@@ -36,11 +54,41 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
     """Build Qdrant index from lex-au AKN corpus."""
     click.echo(f"Chunking corpus at {corpus_dir} ...")
     chunks = chunk_corpus(corpus_dir)
-    click.echo(f"  {len(chunks)} sections found across all Acts.")
-    click.echo(f"Indexing into {storage_dir} ...")
+    sections = [c for c in chunks if c.provision_type == "section"]
+    clauses = [c for c in chunks if c.provision_type == "schedule_clause"]
+    click.echo(
+        f"  {len(sections)} sections + {len(clauses)} schedule clauses "
+        f"= {len(chunks)} total chunks across all Acts."
+    )
+
+    # Build ActRecord list from chunk list
+    act_chunks: dict[str, list] = defaultdict(list)
+    for c in chunks:
+        act_chunks[c.act_name].append(c)
+
+    act_records: list[ActRecord] = []
+    for act_name, act_chunk_list in act_chunks.items():
+        frbr_uri = act_chunk_list[0].frbr_uri
+        year = _year_from_frbr_uri(frbr_uri)
+        as_at = _as_at_from_frbr_uri(frbr_uri)
+        section_count = sum(1 for c in act_chunk_list if c.provision_type == "section")
+        clause_count = sum(1 for c in act_chunk_list if c.provision_type == "schedule_clause")
+        act_records.append(ActRecord(
+            act_name=act_name,
+            frbr_uri=frbr_uri,
+            year=year,
+            as_at_date=as_at,
+            section_count=section_count,
+            schedule_clause_count=clause_count,
+        ))
+
+    click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
     client = QdrantClient(path=str(storage_dir))
-    Indexer(client).upsert_chunks(chunks)
-    click.echo(f"Done. {len(chunks)} chunks indexed.")
+    indexer = Indexer(client)
+    indexer.upsert_chunks(chunks)
+    click.echo(f"  Indexing {len(act_records)} Acts into legislation collection ...")
+    indexer.upsert_acts(act_records)
+    click.echo(f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed.")
 
 
 @cli.command()

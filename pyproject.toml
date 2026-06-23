@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lex-au-search"
-version = "0.1.0"
+version = "0.3.0"
 description = "Hybrid search over Australian Commonwealth legislation — Layer 2 of the AU Legislative Intelligence Stack"
 authors = [{name = "Ching Chew", email = "ching.chew@gmail.com"}]
 license = {text = "MIT"}
