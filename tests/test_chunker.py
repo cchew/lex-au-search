@@ -33,7 +33,7 @@ def test_chunk_xml_section_fields(tmp_path):
     chunks = chunk_xml(xml_file, "Privacy Act 1988")
     s3 = next(c for c in chunks if c.eid == "sec-3")
     assert s3.act_name == "Privacy Act 1988"
-    assert s3.section_num == "3"
+    assert s3.provision_num == "3"
     assert s3.heading == "Interpretation"
     assert "personal information" in s3.text
 

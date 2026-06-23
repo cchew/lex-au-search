@@ -17,9 +17,11 @@ def create_app(searcher: Searcher) -> FastAPI:
                     "act_name": r.chunk.act_name,
                     "frbr_uri": r.chunk.frbr_uri,
                     "eid": r.chunk.eid,
-                    "section_num": r.chunk.section_num,
+                    "provision_num": r.chunk.provision_num,
+                    "provision_type": r.chunk.provision_type,
                     "heading": r.chunk.heading,
                     "text": r.chunk.text,
+                    "refs": r.chunk.refs,
                     "score": r.score,
                 }
                 for r in results

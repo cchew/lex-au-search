@@ -29,7 +29,8 @@ def test_search_response_shape(api_client):
     assert "act_name" in result
     assert "frbr_uri" in result
     assert "eid" in result
-    assert "section_num" in result
+    assert "provision_num" in result
+    assert "provision_type" in result
     assert "heading" in result
     assert "text" in result
     assert "score" in result

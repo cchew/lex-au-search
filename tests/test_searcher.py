@@ -54,9 +54,11 @@ def test_search_act_filter_excludes_other_acts(privacy_chunks):
         act_name="Fair Work Act 2009",
         frbr_uri="/akn/au/act/2009/28/eng@2026-01-01",
         eid="sec-12",
-        section_num="12",
+        provision_num="12",
+        provision_type="section",
         heading="Definitions",
         text="12 Definitions In this Act employee means a person employed.",
+        refs=[],
     )
     client = QdrantClient(":memory:")
     indexer = Indexer(client)

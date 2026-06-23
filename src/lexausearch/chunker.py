@@ -27,16 +27,18 @@ def chunk_xml(xml_path: Path, act_name: str) -> list[Chunk]:
         eid = section.get("eId", "")
         num_el = section.find(f"{AKN}num")
         heading_el = section.find(f"{AKN}heading")
-        section_num = num_el.text.strip() if num_el is not None and num_el.text else ""
+        provision_num = num_el.text.strip() if num_el is not None and num_el.text else ""
         heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
         text = " ".join("".join(section.itertext()).split())
         chunks.append(Chunk(
             act_name=act_name,
             frbr_uri=frbr_uri,
             eid=eid,
-            section_num=section_num,
+            provision_num=provision_num,
+            provision_type="section",
             heading=heading,
             text=text,
+            refs=[],
         ))
 
     # Warn if body-level non-section children exist (untagged schedule/preface content)

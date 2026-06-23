@@ -12,9 +12,11 @@ def _make_result(eid: str, score: float) -> SearchResult:
             act_name="Privacy Act 1988",
             frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
             eid=eid,
-            section_num=eid.split("-")[-1],
+            provision_num=eid.split("-")[-1],
+            provision_type="section",
             heading="Interpretation",
             text="In this Act personal information means...",
+            refs=[],
         ),
         score=score,
     )

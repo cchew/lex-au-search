@@ -40,9 +40,11 @@ class Searcher:
                     act_name=hit.metadata["act_name"],
                     frbr_uri=hit.metadata["frbr_uri"],
                     eid=hit.metadata["eid"],
-                    section_num=hit.metadata["section_num"],
+                    provision_num=hit.metadata["provision_num"],
+                    provision_type=hit.metadata["provision_type"],
                     heading=hit.metadata["heading"],
                     text=hit.metadata["text"],
+                    refs=hit.metadata.get("refs", []),
                 ),
                 score=hit.score,
             )

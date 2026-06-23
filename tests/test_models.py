@@ -1,72 +1,106 @@
-from lexausearch.models import Chunk, SearchResult, format_results
+import pytest
+from lexausearch.models import (
+    Chunk, ActRecord, ActSearchResult, SearchResult, format_results
+)
 
 
-def test_chunk_fields():
-    chunk = Chunk(
+def _chunk(**kwargs) -> Chunk:
+    defaults = dict(
         act_name="Privacy Act 1988",
         frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
-        eid="sec-3",
-        section_num="3",
-        heading="Interpretation",
-        text="In this Act personal information means information about an identified individual.",
-    )
-    assert chunk.act_name == "Privacy Act 1988"
-    assert chunk.eid == "sec-3"
-    assert chunk.heading == "Interpretation"
-
-
-def test_chunk_heading_optional():
-    chunk = Chunk(
-        act_name="Privacy Act 1988",
-        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
-        eid="sec-3",
-        section_num="3",
-        heading=None,
-        text="Some text.",
-    )
-    assert chunk.heading is None
-
-
-def test_format_results_contains_frbr_uri():
-    chunk = Chunk(
-        act_name="Privacy Act 1988",
-        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
-        eid="sec-3",
-        section_num="3",
-        heading="Interpretation",
-        text="In this Act personal information means information about an identified individual.",
-    )
-    result = SearchResult(chunk=chunk, score=0.85)
-    output = format_results([result])
-    assert "Privacy Act 1988" in output
-    assert "sec-3" in output
-    assert "0.85" in output
-    assert chunk.text in output
-
-
-def test_format_results_score_on_header_line():
-    chunk = Chunk(
-        act_name="Fair Work Act 2009",
-        frbr_uri="/akn/au/act/2009/28/eng@2026-01-01",
-        eid="part-1__sec-12",
-        section_num="12",
+        eid="sec-6",
+        provision_num="6",
+        provision_type="section",
         heading="Definitions",
-        text="Some definitions here.",
+        text="Personal information means...",
     )
-    result = SearchResult(chunk=chunk, score=0.71)
-    output = format_results([result])
-    lines = output.strip().split("\n")
-    header = lines[0]
-    assert "score=0.71" in header
-    assert "part-1__sec-12" in header
+    defaults.update(kwargs)
+    return Chunk(**defaults)
 
 
-def test_format_results_multiple():
-    chunks = [
-        Chunk("A Act 2000", "/akn/au/act/2000/1/eng@2026-01-01", "sec-1", "1", "Short title", "Text one."),
-        Chunk("B Act 2001", "/akn/au/act/2001/2/eng@2026-01-01", "sec-2", "2", None, "Text two."),
-    ]
-    results = [SearchResult(c, 0.9 - i * 0.1) for i, c in enumerate(chunks)]
+def test_chunk_has_provision_num():
+    c = _chunk(provision_num="16")
+    assert c.provision_num == "16"
+
+
+def test_chunk_has_provision_type():
+    c = _chunk(provision_type="section")
+    assert c.provision_type == "section"
+
+
+def test_chunk_refs_defaults_empty():
+    c = _chunk()
+    assert c.refs == []
+
+
+def test_chunk_refs_stored():
+    c = _chunk(refs=["#sec-3", "#part-III"])
+    assert c.refs == ["#sec-3", "#part-III"]
+
+
+def test_act_record_fields():
+    r = ActRecord(
+        act_name="Privacy Act 1988",
+        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
+        year=1988,
+        as_at_date="2026-01-01",
+        section_count=42,
+        schedule_clause_count=13,
+    )
+    assert r.year == 1988
+    assert r.as_at_date == "2026-01-01"
+    assert r.section_count == 42
+    assert r.schedule_clause_count == 13
+
+
+def test_act_search_result_fields():
+    r = ActRecord(
+        act_name="Privacy Act 1988",
+        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
+        year=1988, as_at_date="2026-01-01",
+        section_count=1, schedule_clause_count=0,
+    )
+    result = ActSearchResult(record=r, score=0.88)
+    assert result.record.act_name == "Privacy Act 1988"
+    assert result.score == 0.88
+
+
+def test_format_results_section_citation():
+    results = [SearchResult(chunk=_chunk(
+        provision_num="6", provision_type="section", heading="Definitions"
+    ), score=0.95)]
     output = format_results(results)
-    assert "A Act 2000" in output
-    assert "B Act 2001" in output
+    assert "Privacy Act 1988 1988 s 6" in output
+    assert "2026-01-01" in output
+
+
+def test_format_results_schedule_clause_citation():
+    results = [SearchResult(chunk=_chunk(
+        eid="schedule-1__clause-2",
+        provision_num="2",
+        provision_type="schedule_clause",
+        heading="Anonymity",
+    ), score=0.90)]
+    output = format_results(results)
+    assert "Privacy Act 1988 1988 Sch 1 cl 2" in output
+
+
+def test_format_results_filters_unresolved_refs():
+    results = [SearchResult(chunk=_chunk(
+        refs=["#sec-3", "unresolved:Privacy Regulation 2013"],
+    ), score=0.9)]
+    output = format_results(results)
+    assert "#sec-3" in output
+    assert "unresolved:" not in output
+
+
+def test_format_results_no_heading():
+    results = [SearchResult(chunk=_chunk(heading=None), score=0.8)]
+    output = format_results(results)
+    assert "Privacy Act 1988" in output
+
+
+def test_format_results_no_refs_no_refs_line():
+    results = [SearchResult(chunk=_chunk(refs=[]), score=0.8)]
+    output = format_results(results)
+    assert "Refs:" not in output

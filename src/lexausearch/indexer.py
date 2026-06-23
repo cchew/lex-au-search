@@ -36,9 +36,11 @@ class Indexer:
                     "act_name": c.act_name,
                     "frbr_uri": c.frbr_uri,
                     "eid": c.eid,
-                    "section_num": c.section_num,
+                    "provision_num": c.provision_num,
+                    "provision_type": c.provision_type,
                     "heading": c.heading,
                     "text": c.text,
+                    "refs": c.refs,
                 }
                 for c in chunks
             ],
