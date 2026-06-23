@@ -2,7 +2,7 @@
 
 Hybrid semantic search over Australian Commonwealth legislation -- Layer 2 of the AU Legislative Intelligence Stack.
 
-**Status: v0.1.0** — local-first, no Docker, no external APIs.
+**Status: v0.3.0** — local-first, no Docker, no external APIs.
 
 ## Stack position
 
@@ -17,7 +17,8 @@ Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
 
 ## Versions
 
-- **v0.1.0** — 2026-06-20: local hybrid search (dense + BM25), FastAPI, MCP stdio.
+- **v0.3.0** — two-collection Qdrant (`legislation` + `legislation_section`), schedule clause chunking, AU cross-reference extraction (8 patterns), INT8 quantisation, `provision_type` filter, FastMCP auto-exposure.
+- **v0.1.0** — local hybrid search (dense + BM25), FastAPI, MCP stdio.
 
 ## Install
 
