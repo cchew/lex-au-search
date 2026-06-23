@@ -90,7 +90,13 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
             limit=1000,
             with_payload=True,
         )
-        points = sorted(results[0], key=lambda p: _eid_sort_key(p.payload.get("eid", "")))
+        points = sorted(
+            results[0],
+            key=lambda p: (
+                0 if p.payload.get("provision_type") == "section" else 1,
+                *_eid_sort_key(p.payload.get("eid", "")),
+            ),
+        )
         return {
             "chunks": [
                 {
@@ -118,7 +124,13 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
             limit=1000,
             with_payload=True,
         )
-        points = sorted(results[0], key=lambda p: _eid_sort_key(p.payload.get("eid", "")))
+        points = sorted(
+            results[0],
+            key=lambda p: (
+                0 if p.payload.get("provision_type") == "section" else 1,
+                *_eid_sort_key(p.payload.get("eid", "")),
+            ),
+        )
         text = "\n\n".join(p.payload["text"] for p in points)
         return Response(content=text, media_type="text/plain")
 
