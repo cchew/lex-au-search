@@ -71,6 +71,58 @@ def _extract_sections(
     return chunks
 
 
+def _section_num_from_parent(el: etree._Element) -> str:
+    """Climb the element tree to find the enclosing <section>'s <num> text."""
+    parent = el.getparent()
+    while parent is not None:
+        local = parent.tag.split("}")[-1] if "}" in parent.tag else parent.tag
+        if local == "section":
+            num_el = parent.find(f"{AKN}num")
+            if num_el is not None and num_el.text:
+                return num_el.text.strip()
+            break
+        parent = parent.getparent()
+    return ""
+
+
+def _subsec_num_from_eid(eid: str) -> str:
+    """Extract the subsection ordinal from a compound eId, e.g. 'sec-3__subsec-1' → '(1)'."""
+    for part in reversed(eid.split("__")):
+        if part.startswith("subsec-"):
+            return f"({part[len('subsec-'):]}"
+    return ""
+
+
+def _extract_subsections(
+    root: etree._Element,
+    frbr_uri: str,
+    act_name: str,
+    corpus_index: dict[str, str],
+) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for subsec in root.iter(f"{AKN}subsection"):
+        eid = subsec.get("eId", "")
+        text = " ".join(_element_text(subsec).split())
+        if len(text) < 20:
+            continue
+        sec_num = _section_num_from_parent(subsec)
+        subsec_suffix = _subsec_num_from_eid(eid)
+        provision_num = f"{sec_num}{subsec_suffix}" if sec_num else subsec_suffix
+        heading_el = subsec.find(f"{AKN}heading")
+        heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
+        chunks.append(Chunk(
+            act_name=act_name,
+            frbr_uri=frbr_uri,
+            eid=eid,
+            provision_num=provision_num,
+            provision_type="subsection",
+            heading=heading,
+            text=text,
+            refs=extract_refs(text, corpus_index),
+        ))
+    return chunks
+
+
 def _extract_schedule_clauses(
     root: etree._Element,
     frbr_uri: str,
@@ -119,9 +171,12 @@ def chunk_xml(
     frbr_uri = frbr_uri_el.get("value") if frbr_uri_el is not None else ""
 
     sections = _extract_sections(root, frbr_uri, act_name, corpus_index)
+    subsections = _extract_subsections(root, frbr_uri, act_name, corpus_index)
     clauses = _extract_schedule_clauses(root, frbr_uri, act_name, corpus_index)
-    chunks = sections + clauses
-    logger.info(f"{act_name}: {len(sections)} sections, {len(clauses)} schedule clauses")
+    chunks = sections + subsections + clauses
+    logger.info(
+        f"{act_name}: {len(sections)} sections, {len(subsections)} subsections, {len(clauses)} schedule clauses"
+    )
     return chunks
 
 

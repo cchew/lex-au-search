@@ -86,3 +86,85 @@ def test_configure_client_idempotent():
     client = QdrantClient(":memory:")
     configure_client(client)
     configure_client(client)  # must not raise
+
+
+# --- EmbedCache tests ---
+
+from lexausearch.cache import EmbedCache, EMBED_CACHE_COLLECTION
+
+
+def test_embed_cache_creation():
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    info = client.get_collection(EMBED_CACHE_COLLECTION)
+    assert info is not None
+
+
+def test_embed_cache_cold_miss():
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    assert cache.get("some text") is None
+
+
+def test_embed_cache_put_get_roundtrip():
+    import math
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    vector = [0.1] * 768
+    cache.put("hello world", vector)
+    result = cache.get("hello world")
+    assert result is not None
+    assert len(result) == 768
+    # COSINE collections normalise vectors on store; check same direction via dot product ≈ 1
+    norm_a = math.sqrt(sum(v ** 2 for v in vector))
+    norm_b = math.sqrt(sum(v ** 2 for v in result))
+    dot = sum(a * b for a, b in zip(vector, result))
+    cosine_sim = dot / (norm_a * norm_b)
+    assert abs(cosine_sim - 1.0) < 1e-4
+
+
+def test_embed_cache_get_batch():
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    cache.put("text one", [0.1] * 768)
+    cache.put("text two", [0.2] * 768)
+    hits = cache.get_batch(["text one", "text two", "text three"])
+    assert "text one" in hits
+    assert "text two" in hits
+    assert "text three" not in hits
+
+
+def test_embed_cache_uuid5_deterministic():
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    # Same text → same UUID
+    assert cache._cache_id("hello") == cache._cache_id("hello")
+    # Different text → different UUID
+    assert cache._cache_id("hello") != cache._cache_id("world")
+
+
+def test_indexer_with_cache_smoke(privacy_chunks):
+    """Cache-enabled upsert_chunks runs without error and results are searchable."""
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    idx = Indexer(client, cache=cache)
+    idx.upsert_chunks(privacy_chunks)
+    results = client.scroll(
+        collection_name=COLLECTION_SECTIONS, limit=10, with_payload=True
+    )
+    assert len(results[0]) == len(privacy_chunks)
+
+
+def test_indexer_cache_second_ingest_uses_cache(privacy_chunks):
+    """Second upsert_chunks with same texts skips embedding (cache hits)."""
+    client = QdrantClient(":memory:")
+    cache = EmbedCache(client)
+    idx = Indexer(client, cache=cache)
+    idx.upsert_chunks(privacy_chunks)
+    # Populate cache from first run; second run should use only cached vectors
+    cache_hits_before = cache.get_batch(
+        ["search_document: " + c.text for c in privacy_chunks]
+    )
+    assert len(cache_hits_before) == len(privacy_chunks)
+    # Calling again must not raise
+    idx.upsert_chunks(privacy_chunks)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import uuid
+from typing import TYPE_CHECKING
+
 from qdrant_client import QdrantClient
+from qdrant_client import models as qmodels
 from qdrant_client.models import (
     ScalarQuantization,
     ScalarQuantizationConfig,
@@ -10,12 +14,13 @@ from qdrant_client.models import (
 
 from lexausearch.models import ActRecord, Chunk
 
+if TYPE_CHECKING:
+    from lexausearch.cache import EmbedCache
+
 DENSE_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
-
-_configured_clients: set[int] = set()
 
 _QUANT_CONFIG = ScalarQuantization(
     scalar=ScalarQuantizationConfig(
@@ -27,16 +32,12 @@ _QUANT_CONFIG = ScalarQuantization(
 
 
 def configure_client(client: QdrantClient) -> QdrantClient:
-    cid = id(client)
-    if cid not in _configured_clients:
-        client.set_model(DENSE_MODEL)
-        client.set_sparse_model(SPARSE_MODEL)
-        _configured_clients.add(cid)
+    client.set_model(DENSE_MODEL)
+    client.set_sparse_model(SPARSE_MODEL)
     return client
 
 
 def _ensure_collection(client: QdrantClient, name: str) -> None:
-    """Create collection with INT8 quantisation if it doesn't already exist."""
     try:
         client.create_collection(
             collection_name=name,
@@ -67,8 +68,9 @@ def _create_payload_indexes(
 
 
 class Indexer:
-    def __init__(self, client: QdrantClient) -> None:
+    def __init__(self, client: QdrantClient, cache: EmbedCache | None = None) -> None:
         self._client = configure_client(client)
+        self._cache = cache
 
     def upsert_chunks(self, chunks: list[Chunk]) -> None:
         if not chunks:
@@ -78,23 +80,91 @@ class Indexer:
             self._client, COLLECTION_SECTIONS,
             ["act_name", "frbr_uri", "provision_type"],
         )
-        self._client.add(
+        if self._cache is None:
+            self._client.add(
+                collection_name=COLLECTION_SECTIONS,
+                documents=["search_document: " + c.text for c in chunks],
+                metadata=[
+                    {
+                        "act_name": c.act_name,
+                        "frbr_uri": c.frbr_uri,
+                        "eid": c.eid,
+                        "provision_num": c.provision_num,
+                        "provision_type": c.provision_type,
+                        "heading": c.heading,
+                        "text": c.text,
+                        "refs": c.refs,
+                    }
+                    for c in chunks
+                ],
+                batch_size=32,
+            )
+        else:
+            self._upsert_chunks_with_cache(chunks)
+
+    def _upsert_chunks_with_cache(self, chunks: list[Chunk]) -> None:
+        """Cache-aware upsert: reuse stored dense embeddings for unchanged chunk texts."""
+        prefixed = ["search_document: " + c.text for c in chunks]
+
+        # Dense vectors: check cache, embed only misses
+        cached = self._cache.get_batch(prefixed)
+        miss_texts = [t for t in prefixed if t not in cached]
+        if miss_texts:
+            fresh = dict(
+                self._client._embed_documents(
+                    miss_texts,
+                    embedding_model_name=self._client.embedding_model_name,
+                    embed_type="passage",
+                )
+            )
+            # Store misses in cache
+            for text, vec in fresh.items():
+                self._cache.put(text, vec)
+            cached.update(fresh)
+
+        # Sparse vectors: always compute (BM25 is fast)
+        sparse_list = list(
+            self._client._sparse_embed_documents(
+                prefixed,
+                embedding_model_name=self._client.sparse_embedding_model_name,
+            )
+        )
+
+        dense_field = self._client.get_vector_field_name()
+        sparse_field = self._client.get_sparse_vector_field_name()
+
+        points = []
+        for i, (chunk, prefixed_text, sparse_sv) in enumerate(
+            zip(chunks, prefixed, sparse_list)
+        ):
+            dense_vec = cached[prefixed_text]
+            point_vector: dict = {dense_field: dense_vec}
+            if sparse_field is not None:
+                point_vector[sparse_field] = qmodels.SparseVector(
+                    indices=sparse_sv.indices,
+                    values=sparse_sv.values,
+                )
+            payload = {
+                "document": prefixed_text,
+                "act_name": chunk.act_name,
+                "frbr_uri": chunk.frbr_uri,
+                "eid": chunk.eid,
+                "provision_num": chunk.provision_num,
+                "provision_type": chunk.provision_type,
+                "heading": chunk.heading,
+                "text": chunk.text,
+                "refs": chunk.refs,
+            }
+            points.append(qmodels.PointStruct(
+                id=uuid.uuid4().hex,
+                vector=point_vector,
+                payload=payload,
+            ))
+
+        self._client.upsert(
             collection_name=COLLECTION_SECTIONS,
-            documents=["search_document: " + c.text for c in chunks],
-            metadata=[
-                {
-                    "act_name": c.act_name,
-                    "frbr_uri": c.frbr_uri,
-                    "eid": c.eid,
-                    "provision_num": c.provision_num,
-                    "provision_type": c.provision_type,
-                    "heading": c.heading,
-                    "text": c.text,
-                    "refs": c.refs,
-                }
-                for c in chunks
-            ],
-            batch_size=32,
+            points=points,
+            wait=True,
         )
 
     def upsert_acts(self, act_records: list[ActRecord]) -> None:
@@ -124,4 +194,3 @@ class Indexer:
             ],
             batch_size=32,
         )
-

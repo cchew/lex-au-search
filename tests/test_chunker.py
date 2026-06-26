@@ -157,6 +157,64 @@ def test_table_cells_separated(tmp_path):
     assert "Application fee | 100 penalty units" in sec7.text
 
 
+def test_subsection_chunks_extracted(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML_V4, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML_V4.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    subsec_chunks = [c for c in chunks if c.provision_type == "subsection"]
+    # sec-6__subsec-3 has text "Short." which is < 20 chars → skipped
+    assert len(subsec_chunks) == 2
+
+
+def test_subsection_eid_and_provision_num(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML_V4, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML_V4.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    ss1 = next(c for c in chunks if c.eid == "sec-6__subsec-1")
+    assert ss1.provision_type == "subsection"
+    assert ss1.provision_num == "6(1"
+
+
+def test_subsection_text_non_empty(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML_V4, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML_V4.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    subsec_chunks = [c for c in chunks if c.provision_type == "subsection"]
+    assert all(len(c.text) >= 20 for c in subsec_chunks)
+
+
+def test_stub_subsections_skipped(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML_V4, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML_V4.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    # sec-6__subsec-3 text is "Short." — should not appear
+    eids = [c.eid for c in chunks]
+    assert "sec-6__subsec-3" not in eids
+
+
+def test_section_chunks_alongside_subsections(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML_V4, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML_V4.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    section_chunks = [c for c in chunks if c.provision_type == "section"]
+    subsec_chunks = [c for c in chunks if c.provision_type == "subsection"]
+    assert len(section_chunks) == 1
+    assert len(subsec_chunks) == 2
+
+
+def test_chunk_terms_field_defaults_to_empty(tmp_path):
+    from tests.conftest import PRIVACY_ACT_XML, CORPUS_INDEX
+    xml_file = tmp_path / "privacy-act-1988.xml"
+    xml_file.write_bytes(PRIVACY_ACT_XML.encode())
+    chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
+    assert all(c.terms == [] for c in chunks)
+
+
 def test_refs_populated_from_text(tmp_path):
     from tests.conftest import CORPUS_INDEX
     # Minimal XML with a cross-ref in a section

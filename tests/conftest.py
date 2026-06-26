@@ -120,6 +120,55 @@ PRIVACY_ACT_XML = f"""\
 </akomaNtoso>"""
 
 
+PRIVACY_ACT_XML_V4 = f"""\
+<?xml version='1.0' encoding='UTF-8'?>
+<akomaNtoso xmlns="{AKN_NS}">
+  <act name="act">
+    <meta>
+      <identification source="#lex-au">
+        <FRBRWork>
+          <FRBRthis value="/akn/au/act/1988/119/!main"/>
+          <FRBRuri value="/akn/au/act/1988/119"/>
+          <FRBRdate date="1988" name="Generation"/>
+          <FRBRauthor href="#parliament"/>
+        </FRBRWork>
+        <FRBRExpression>
+          <FRBRthis value="/akn/au/act/1988/119/eng@2026-01-01/!main"/>
+          <FRBRuri value="/akn/au/act/1988/119/eng@2026-01-01"/>
+          <FRBRdate date="2026-01-01" name="Generation"/>
+          <FRBRauthor href="#parliament"/>
+          <FRBRlanguage language="eng"/>
+        </FRBRExpression>
+        <FRBRManifestation>
+          <FRBRthis value="/akn/au/act/1988/119/eng@2026-01-01/!main.akn"/>
+          <FRBRuri value="/akn/au/act/1988/119/eng@2026-01-01/!main.akn"/>
+          <FRBRdate date="2026-06-19" name="Generation"/>
+          <FRBRauthor href="#lex-au"/>
+        </FRBRManifestation>
+      </identification>
+    </meta>
+    <body>
+      <section eId="sec-6">
+        <num>6</num>
+        <heading>Meaning of personal information</heading>
+        <subsection eId="sec-6__subsec-1">
+          <num>(1)</num>
+          <content><p>Personal information means information or an opinion about an identified individual, whether the information or opinion is true or not.</p></content>
+        </subsection>
+        <subsection eId="sec-6__subsec-2">
+          <num>(2)</num>
+          <content><p>The information or opinion must be recorded in a material form.</p></content>
+        </subsection>
+        <subsection eId="sec-6__subsec-3">
+          <num>(3)</num>
+          <content><p>Short.</p></content>
+        </subsection>
+      </section>
+    </body>
+  </act>
+</akomaNtoso>"""
+
+
 @pytest.fixture(scope="module")
 def privacy_chunks() -> list[Chunk]:
     return [

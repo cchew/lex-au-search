@@ -7,12 +7,12 @@ class Chunk:
     act_name: str
     frbr_uri: str
     eid: str
-    provision_num: str        # "16" for sections; "1" or "1.1" for schedule clauses
-    provision_type: str       # "section" or "schedule_clause"
+    provision_num: str        # "16" for sections; "3(1)" for subsections; "1" or "1.1" for schedule clauses
+    provision_type: str       # "section", "subsection", or "schedule_clause"
     heading: str | None
     text: str
     refs: list[str] = field(default_factory=list)
-    # terms: list[str]  # reserved for v0.4.0 AKN <TLCTerm> extraction
+    terms: list[str] = field(default_factory=list)  # AKN <TLCTerm> eIds, e.g. "term-personal-information"
 
 
 @dataclass
