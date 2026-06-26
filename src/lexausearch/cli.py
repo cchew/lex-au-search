@@ -55,10 +55,11 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
     click.echo(f"Chunking corpus at {corpus_dir} ...")
     chunks = chunk_corpus(corpus_dir)
     sections = [c for c in chunks if c.provision_type == "section"]
+    subsections = [c for c in chunks if c.provision_type == "subsection"]
     clauses = [c for c in chunks if c.provision_type == "schedule_clause"]
     click.echo(
-        f"  {len(sections)} sections + {len(clauses)} schedule clauses "
-        f"= {len(chunks)} total chunks across all Acts."
+        f"  {len(sections)} sections + {len(subsections)} subsections "
+        f"+ {len(clauses)} schedule clauses = {len(chunks)} total chunks across all Acts."
     )
 
     # Build ActRecord list from chunk list
@@ -85,7 +86,11 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
     click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
     client = QdrantClient(path=str(storage_dir))
     indexer = Indexer(client)
-    indexer.upsert_chunks(chunks)
+    act_names = list(act_chunks.keys())
+    for i, act_name in enumerate(act_names, 1):
+        act_chunk_list = act_chunks[act_name]
+        click.echo(f"  [{i}/{len(act_names)}] {act_name} ({len(act_chunk_list)} chunks)")
+        indexer.upsert_chunks(act_chunk_list)
     click.echo(f"  Indexing {len(act_records)} Acts into legislation collection ...")
     indexer.upsert_acts(act_records)
     click.echo(f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed.")
