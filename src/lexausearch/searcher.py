@@ -83,7 +83,7 @@ class Searcher:
         query_filter = models.Filter(must=must) if must else None
 
         hits = self._hybrid_query(
-            COLLECTION_SECTIONS, "search_query: " + query, query_filter, limit
+            COLLECTION_SECTIONS, query, query_filter, limit
         )
         return [
             SearchResult(
@@ -108,7 +108,7 @@ class Searcher:
         limit: int = 5,
     ) -> list[ActSearchResult]:
         hits = self._hybrid_query(
-            COLLECTION_ACTS, "search_query: " + query, None, limit
+            COLLECTION_ACTS, query, None, limit
         )
         return [
             ActSearchResult(

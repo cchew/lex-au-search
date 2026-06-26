@@ -6,7 +6,7 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qmodels
 
 EMBED_CACHE_COLLECTION = "embed_cache"
-DENSE_VECTOR_SIZE = 768  # nomic-ai/nomic-embed-text-v1.5 output dimension
+DENSE_VECTOR_SIZE = 768  # BAAI/bge-base-en-v1.5 output dimension
 _UUID5_NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # URL namespace
 
 
@@ -14,7 +14,7 @@ class EmbedCache:
     """Persistent UUID5-keyed dense embedding cache backed by a Qdrant collection.
 
     Key: UUID5(URL_NS, text) — deterministic, content-addressed.
-    Value: list[float] dense vector (768-dim for nomic-embed-text-v1.5).
+    Value: list[float] dense vector (768-dim for BAAI/bge-base-en-v1.5).
 
     The cache is optional: Indexer falls back to client.add() when cache=None.
     """

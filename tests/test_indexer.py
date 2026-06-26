@@ -163,7 +163,7 @@ def test_indexer_cache_second_ingest_uses_cache(privacy_chunks):
     idx.upsert_chunks(privacy_chunks)
     # Populate cache from first run; second run should use only cached vectors
     cache_hits_before = cache.get_batch(
-        ["search_document: " + c.text for c in privacy_chunks]
+        [c.text for c in privacy_chunks]
     )
     assert len(cache_hits_before) == len(privacy_chunks)
     # Calling again must not raise

@@ -17,7 +17,7 @@ from lexausearch.models import ActRecord, Chunk
 if TYPE_CHECKING:
     from lexausearch.cache import EmbedCache
 
-DENSE_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+DENSE_MODEL = "BAAI/bge-base-en-v1.5"
 SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
@@ -81,34 +81,36 @@ class Indexer:
             ["act_name", "frbr_uri", "provision_type"],
         )
         if self._cache is None:
-            self._client.add(
-                collection_name=COLLECTION_SECTIONS,
-                documents=["search_document: " + c.text for c in chunks],
-                metadata=[
-                    {
-                        "act_name": c.act_name,
-                        "frbr_uri": c.frbr_uri,
-                        "eid": c.eid,
-                        "provision_num": c.provision_num,
-                        "provision_type": c.provision_type,
-                        "heading": c.heading,
-                        "text": c.text,
-                        "refs": c.refs,
-                    }
-                    for c in chunks
-                ],
-                batch_size=32,
-            )
+            for i in range(0, len(chunks), 64):
+                sub = chunks[i : i + 64]
+                self._client.add(
+                    collection_name=COLLECTION_SECTIONS,
+                    documents=[c.text for c in sub],
+                    metadata=[
+                        {
+                            "act_name": c.act_name,
+                            "frbr_uri": c.frbr_uri,
+                            "eid": c.eid,
+                            "provision_num": c.provision_num,
+                            "provision_type": c.provision_type,
+                            "heading": c.heading,
+                            "text": c.text,
+                            "refs": c.refs,
+                        }
+                        for c in sub
+                    ],
+                    batch_size=32,
+                )
         else:
             self._upsert_chunks_with_cache(chunks)
 
     def _upsert_chunks_with_cache(self, chunks: list[Chunk]) -> None:
         """Cache-aware upsert: reuse stored dense embeddings for unchanged chunk texts."""
-        prefixed = ["search_document: " + c.text for c in chunks]
+        texts = [c.text for c in chunks]
 
         # Dense vectors: check cache, embed only misses
-        cached = self._cache.get_batch(prefixed)
-        miss_texts = [t for t in prefixed if t not in cached]
+        cached = self._cache.get_batch(texts)
+        miss_texts = [t for t in texts if t not in cached]
         if miss_texts:
             fresh = dict(
                 self._client._embed_documents(
@@ -125,7 +127,7 @@ class Indexer:
         # Sparse vectors: always compute (BM25 is fast)
         sparse_list = list(
             self._client._sparse_embed_documents(
-                prefixed,
+                texts,
                 embedding_model_name=self._client.sparse_embedding_model_name,
             )
         )
@@ -134,10 +136,8 @@ class Indexer:
         sparse_field = self._client.get_sparse_vector_field_name()
 
         points = []
-        for i, (chunk, prefixed_text, sparse_sv) in enumerate(
-            zip(chunks, prefixed, sparse_list)
-        ):
-            dense_vec = cached[prefixed_text]
+        for chunk, text, sparse_sv in zip(chunks, texts, sparse_list):
+            dense_vec = cached[text]
             point_vector: dict = {dense_field: dense_vec}
             if sparse_field is not None:
                 point_vector[sparse_field] = qmodels.SparseVector(
@@ -145,7 +145,7 @@ class Indexer:
                     values=sparse_sv.values,
                 )
             payload = {
-                "document": prefixed_text,
+                "document": text,
                 "act_name": chunk.act_name,
                 "frbr_uri": chunk.frbr_uri,
                 "eid": chunk.eid,

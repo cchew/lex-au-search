@@ -2,7 +2,7 @@
 
 Hybrid semantic search over Australian Commonwealth legislation -- Layer 2 of the AU Legislative Intelligence Stack.
 
-**Status: v0.3.0** — local-first, no Docker, no external APIs. Embedding model: `nomic-ai/nomic-embed-text-v1.5` (local ONNX, stays through v0.4.0+).
+**Status: v0.4.0** — local-first, no Docker, no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Stack position
 
@@ -17,7 +17,7 @@ Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
 
 ## Versions
 
-- **v0.4.0** (planned): `client.query()` → `client.query_points()` migration, paragraph-level chunking (uses lex-au v0.4.0 subsection eIds), embedding cache (Qdrant collection, UUID5-keyed), first full corpus ingest.
+- **v0.4.0**: `client.query()` → `client.query_points()` migration, paragraph-level chunking (uses lex-au v0.4.0 subsection eIds), embedding cache (Qdrant collection, UUID5-keyed), switched dense model to `BAAI/bge-base-en-v1.5` (512-token context; nomic 8192-token context caused OOM on Apple Silicon during ingest).
 - **v0.3.0** — two-collection Qdrant (`legislation` + `legislation_section`), schedule clause chunking, AU cross-reference extraction (8 patterns), INT8 quantisation, `provision_type` filter, FastMCP auto-exposure.
 - **v0.1.0** — local hybrid search (dense + BM25), FastAPI, MCP stdio.
 
@@ -40,7 +40,7 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 - [ ] The lex-au corpus must be built first (see step 1 below); confirm `corpus/xml/*.xml` files are present
 - [ ] Set `LEXAU_SEARCH_STORAGE` to the absolute path of `qdrant_storage/` before wiring up the MCP server
 
-**First-run model download:** On first ingest, FastEmbed downloads `nomic-ai/nomic-embed-text-v1.5` and `Qdrant/bm25` to `~/.cache/fastembed/` (~270 MB total). Subsequent runs skip the download.
+**First-run model download:** On first ingest, FastEmbed downloads `BAAI/bge-base-en-v1.5` and `Qdrant/bm25` to `~/.cache/fastembed/` (~135 MB total). Subsequent runs skip the download.
 
 **Resuming after interruption:** Qdrant local storage is not transactional at the ingest level — a partial run leaves a corrupt collection. Delete `qdrant_storage/` and re-run `ingest` from scratch.
 
