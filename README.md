@@ -2,7 +2,7 @@
 
 Hybrid semantic search over Australian Commonwealth legislation -- Layer 2 of the AU Legislative Intelligence Stack.
 
-**Status: v0.3.0** — local-first, no Docker, no external APIs.
+**Status: v0.3.0** — local-first, no Docker, no external APIs. Embedding model: `nomic-ai/nomic-embed-text-v1.5` (local ONNX, stays through v0.4.0+).
 
 ## Stack position
 
@@ -17,6 +17,7 @@ Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
 
 ## Versions
 
+- **v0.4.0** (planned): `client.query()` → `client.query_points()` migration, paragraph-level chunking (uses lex-au v0.4.0 subsection eIds), embedding cache (Qdrant collection, UUID5-keyed), first full corpus ingest.
 - **v0.3.0** — two-collection Qdrant (`legislation` + `legislation_section`), schedule clause chunking, AU cross-reference extraction (8 patterns), INT8 quantisation, `provision_type` filter, FastMCP auto-exposure.
 - **v0.1.0** — local hybrid search (dense + BM25), FastAPI, MCP stdio.
 
