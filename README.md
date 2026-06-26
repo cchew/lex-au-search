@@ -116,8 +116,9 @@ Response:
 }
 ```
 
-## Known limits (v0.1.0)
+## Known limits and future considerations
 
-- Schedule content (e.g. Privacy Act Schedule 1 -- APPs) not indexed (lex-au v0.1.0 gap; resolved in lex-au v0.2.0)
 - No auth on HTTP API (local use only)
-- Section-level citations only; subsection-level requires lex-au v0.2.0 + re-ingest
+- `get_act_sections` and `get_act_text` return full Act content — responses exceed LLM context limits for any non-trivial Act; use `search_legislation` for NL queries
+- Social Security (Administration) Act 1999 not indexed — notification obligation provisions fall back to model training data
+- **Embedding performance:** local ONNX ingest (bge-base-en-v1.5) takes 60-90 min for the current 11-Act corpus on Apple Silicon. OpenAI `text-embedding-3-small` API would likely reduce wall-clock time significantly at the cost of an API dependency and per-token cost; trade-off to evaluate for v0.5.0 when corpus expands
