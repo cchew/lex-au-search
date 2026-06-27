@@ -107,7 +107,7 @@ Response:
       "act_name": "Privacy Act 1988",
       "frbr_uri": "/akn/au/act/1988/119/eng@2026-01-01",
       "eid": "part-III__sec-16",
-      "section_num": "16",
+      "provision_num": "16",
       "heading": "Interference with privacy of an individual",
       "text": "...",
       "score": 0.847
