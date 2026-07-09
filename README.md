@@ -1,22 +1,26 @@
 # lex-au-search
 
-Hybrid semantic search over Australian Commonwealth legislation -- Layer 2 of the AU Legislative Intelligence Stack.
+Hybrid semantic search over Australian Commonwealth legislation -- the retrieval layer of the AU Legislative Intelligence Stack.
 
-**Status: v0.4.0** — local-first, no Docker, no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
+**Status: v0.4.1** — local-first, no Docker, no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Stack position
 
 ```
-Layer 1: lex-au        -- AKN 3.0 XML corpus
-Layer 2: lex-au-search -- hybrid search API + MCP  <- this project
-Layer 3: ClauseKit     -- rule extraction JSON
-Agent demo             -- NL query -> attributed answer (future)
+Corpus:       lex-au         -- AKN 3.0 XML corpus
+Retrieval:    lex-au-search  -- hybrid search API + MCP  <- this project
+              lex-au-graph   -- cross-reference graph + definition resolution
+Applications: ClauseKit       -- rule extraction JSON
+              term-comparison -- IM2026 definition-comparison bot
 ```
 
-Roadmap: `projects/lex-au/FUTURE.md` covers all layers.
+See also: `lex-au-graph` for defined-term resolution and cross-reference traversal -- for queries about what a term means or how it's defined across Acts, check there before or alongside a search call here; flat vector search can return the wrong Act's use of a homonymous term.
+
+Full roadmap and discovery doc: `projects/lex-au/FUTURE.md` and this repo's `STACK.md`.
 
 ## Versions
 
+- **v0.4.1** — MCP tool description improvements: `search_legislation` now points agents to lex-au-graph for definition/term queries; `get_act_text`/`get_act_sections` now warn about context-window blowup on large Acts directly in the tool description (the string FastMCP actually surfaces, not just README prose). Added `STACK.md` discovery doc. Corrected a stale version string (`pyproject.toml` and the FastAPI app itself said 0.3.0 despite this repo shipping 0.4.0).
 - **v0.4.0**: `client.query()` → `client.query_points()` migration, paragraph-level chunking (uses lex-au v0.4.0 subsection eIds), embedding cache (Qdrant collection, UUID5-keyed), switched dense model to `BAAI/bge-base-en-v1.5` (512-token context; nomic 8192-token context caused OOM on Apple Silicon during ingest).
 - **v0.3.0** — two-collection Qdrant (`legislation` + `legislation_section`), schedule clause chunking, AU cross-reference extraction (8 patterns), INT8 quantisation, `provision_type` filter, FastMCP auto-exposure.
 - **v0.1.0** — local hybrid search (dense + BM25), FastAPI, MCP stdio.

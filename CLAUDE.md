@@ -1,12 +1,14 @@
 # lex-au-search
 
-Layer 2 of the AU Legislative Intelligence Stack. Hybrid search (dense + BM25 sparse) over the lex-au AKN 3.0 XML corpus.
+Retrieval layer of the AU Legislative Intelligence Stack. Hybrid search (dense + BM25 sparse) over the lex-au AKN 3.0 XML corpus.
 
 ## Stack position
 
-Layer 1: lex-au (../lex-au/repo/) — AKN 3.0 XML corpus
-Layer 2: lex-au-search (this repo) — hybrid search API + MCP
-Layer 3: ClauseKit (../clause-kit/repo/) — rule extraction
+Corpus: lex-au (../lex-au/repo/) — AKN 3.0 XML corpus
+Retrieval: lex-au-search (this repo) — hybrid search API + MCP; lex-au-graph (../lex-au-graph/repo/) — cross-reference graph + definition resolution
+Applications: ClauseKit (../clause-kit/repo/) — rule extraction; term-comparison (../term-comparison/repo/) — IM2026 definition-comparison bot
+
+Call-order note: for queries about a term's meaning or cross-Act definition chains, check lex-au-graph before or alongside search here — this project's hybrid search can match the wrong Act's use of a homonymous term.
 
 ## Setup
 

@@ -15,14 +15,19 @@ def _eid_sort_key(eid: str) -> tuple[int, ...]:
 
 
 def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
-    app = FastAPI(title="lex-au-search", version="0.3.0")
+    app = FastAPI(title="lex-au-search", version="0.4.1")
 
     @app.get(
         "/search",
         operation_id="search_legislation",
         description=(
             "Search Australian Commonwealth legislation by topic or question. "
-            "Returns relevant sections and schedule clauses with FRBR citations."
+            "Returns relevant sections and schedule clauses with FRBR citations. "
+            "For 'what does term X mean' or cross-Act definition questions, call "
+            "lex-au-graph's resolve_definition or find_all_definitions tool first (or "
+            "alongside this one) — hybrid search here can return the wrong Act's use of "
+            "a homonymous term, since it matches on semantic similarity, not authoritative "
+            "definition scope."
         ),
     )
     def search(
@@ -79,7 +84,11 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
     @app.get(
         "/legislation/{act_name}/sections",
         operation_id="get_act_sections",
-        description="Retrieve all indexed provisions for an Act, sorted by eId.",
+        description=(
+            "Retrieve all indexed provisions for an Act, sorted by eId. Can be large for "
+            "big Acts (Corporations Act, Migration Act, Income Tax Assessment Act each have "
+            "1000+ provisions) — prefer search_legislation with a specific query where possible."
+        ),
     )
     def get_sections(act_name: str) -> dict:
         results = client.scroll(
@@ -113,7 +122,14 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
     @app.get(
         "/legislation/{act_name}/text",
         operation_id="get_act_text",
-        description="Full Act text concatenated in provision order (plain text).",
+        description=(
+            "Full Act text concatenated in provision order (plain text). WARNING: this can "
+            "be tens of thousands of tokens for a large Act (e.g. Corporations Act, Migration "
+            "Act, Income Tax Assessment Act) and will exceed most agent context windows. Use "
+            "search_legislation for a targeted query or get_act_sections with filtering "
+            "instead — only call this for genuinely small Acts or when the full text is "
+            "explicitly required."
+        ),
     )
     def get_text(act_name: str) -> Response:
         results = client.scroll(
