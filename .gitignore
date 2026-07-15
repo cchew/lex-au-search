@@ -9,3 +9,6 @@ corpus/
 dist/
 build/
 .env
+
+# Superpowers planning docs live in the EA wrapper repo, not here
+docs/superpowers/
