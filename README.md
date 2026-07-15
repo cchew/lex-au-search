@@ -2,7 +2,7 @@
 
 Hybrid semantic search and natural language query over Australian Commonwealth legislation.
 
-**Status: v0.4.1** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
+**Status: v0.4.2** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Uses / used by
 
@@ -14,6 +14,7 @@ Full stack map: this repo's [`STACK.md`](STACK.md) and [lex-au's `FUTURE.md`](ht
 
 ## Versions
 
+- **v0.4.2** - `ingest` auto-detects a CUDA GPU (via `onnxruntime.get_available_providers()`) and uses it if present, falling back to CPU otherwise - same command either way. Install the `gpu` extra to enable it.
 - **v0.4.1** - MCP tool description AX improvements, `STACK.md` discovery doc, fixed stale version string.
 - **v0.4.0** - `client.query_points()` migration, paragraph-level chunking, embedding cache, switched to `BAAI/bge-base-en-v1.5`.
 - **v0.3.0** - Two-collection Qdrant, schedule clause chunking, AU cross-reference extraction, INT8 quantisation, FastMCP auto-exposure.
@@ -28,7 +29,9 @@ pip install -e ".[dev]"
 
 ## Before full ingest
 
-The ingest command embeds sections using a local ONNX model (~270 MB, downloaded once to `~/.cache/fastembed/`). With the current 11-Act corpus (~4000+ sections after v0.2.0 rebuild) it takes roughly 60-90 minutes on Apple Silicon and uses significant RAM while running.
+The ingest command embeds sections using a local ONNX model (~270 MB, downloaded once to `~/.cache/fastembed/`). CPU-only ingest does not scale well past a few hundred Acts - budget on the order of a day or more for the full corpus (2,900+ Acts, 500,000+ chunks) on a laptop CPU, and significant RAM while running.
+
+**GPU acceleration:** `ingest` auto-detects an available CUDA GPU and uses it transparently - no flag, no separate command. To enable it, install the `gpu` extra (`pip install -e ".[gpu]"`) on a CUDA-capable machine, which pulls in `onnxruntime-gpu` instead of the CPU-only `onnxruntime`; the two packages conflict, so uninstall the CPU one first (`pip uninstall onnxruntime && pip install -e ".[gpu]"`). Without a CUDA GPU (or without the `gpu` extra), `ingest` runs on CPU exactly as before - nothing to configure. This makes it practical to run the same `lex-au-search ingest` command on a free Colab GPU runtime, a rented GPU cloud instance, or a plain laptop, whichever you have.
 
 **Checklist before starting:**
 
@@ -66,7 +69,7 @@ lexau build --all --corpus-dir corpus/
 cd /path/to/lex-au-search/repo
 source .venv/bin/activate
 lex-au-search ingest --corpus-dir corpus/   # or ../lex-au/repo/corpus/ if built from source
-# Takes 60-90 min on Apple Silicon; close other apps first
+# CPU: a day or more for the full corpus. Faster on a CUDA GPU (auto-detected) - see "Before full ingest"
 ```
 
 **3. Search:**
@@ -130,5 +133,5 @@ Response:
 
 ## Under consideration
 
-- **Embedding performance:** local ONNX ingest (bge-base-en-v1.5) takes 60-90 min for the current 11-Act corpus on Apple Silicon. OpenAI `text-embedding-3-small` API would likely reduce wall-clock time significantly at the cost of an API dependency and per-token cost; trade-off to evaluate for v0.5.0 when corpus expands.
+- **Embedding performance:** CPU ingest of the full corpus (2,900+ Acts) takes on the order of a day or more on a laptop CPU; v0.4.2's CUDA auto-detect (see "Before full ingest") is the current mitigation. OpenAI `text-embedding-3-small` API would also cut wall-clock time at the cost of an API dependency and per-token cost - not pursued while the free-GPU path covers it.
 - **Query-side RAG tuning:** Santander AI's [linear-adapter-trainer](https://github.com/Santander-AI/linear-adapter-trainer) (Apache 2.0) applies a lightweight linear projection on top of a frozen embedding model to close the query-document distribution gap without retraining the embedder. Worth evaluating if retrieval precision drops as the corpus grows; the adapter can be trained on AU legislative query-passage pairs derived from existing MCP session logs.

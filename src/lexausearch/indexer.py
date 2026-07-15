@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+import onnxruntime
 from qdrant_client import QdrantClient
 from qdrant_client import models as qmodels
 from qdrant_client.models import (
@@ -31,8 +32,12 @@ _QUANT_CONFIG = ScalarQuantization(
 )
 
 
+def _cuda_available() -> bool:
+    return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+
+
 def configure_client(client: QdrantClient) -> QdrantClient:
-    client.set_model(DENSE_MODEL)
+    client.set_model(DENSE_MODEL, cuda=_cuda_available())
     client.set_sparse_model(SPARSE_MODEL)
     return client
 

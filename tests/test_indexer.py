@@ -88,6 +88,34 @@ def test_configure_client_idempotent():
     configure_client(client)  # must not raise
 
 
+def test_configure_client_enables_cuda_when_available(monkeypatch):
+    from unittest.mock import MagicMock
+    from lexausearch import indexer
+
+    monkeypatch.setattr(
+        indexer.onnxruntime, "get_available_providers",
+        lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    client = QdrantClient(":memory:")
+    client.set_model = MagicMock()
+    configure_client(client)
+    client.set_model.assert_called_once_with(indexer.DENSE_MODEL, cuda=True)
+
+
+def test_configure_client_disables_cuda_when_unavailable(monkeypatch):
+    from unittest.mock import MagicMock
+    from lexausearch import indexer
+
+    monkeypatch.setattr(
+        indexer.onnxruntime, "get_available_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+    client = QdrantClient(":memory:")
+    client.set_model = MagicMock()
+    configure_client(client)
+    client.set_model.assert_called_once_with(indexer.DENSE_MODEL, cuda=False)
+
+
 # --- EmbedCache tests ---
 
 from lexausearch.cache import EmbedCache, EMBED_CACHE_COLLECTION
