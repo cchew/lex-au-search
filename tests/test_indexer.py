@@ -116,6 +116,29 @@ def test_configure_client_disables_cuda_when_unavailable(monkeypatch):
     client.set_model.assert_called_once_with(indexer.DENSE_MODEL, cuda=False)
 
 
+def test_configure_client_prints_which_backend_is_used(monkeypatch, capsys):
+    from unittest.mock import MagicMock
+    from lexausearch import indexer
+
+    monkeypatch.setattr(
+        indexer.onnxruntime, "get_available_providers",
+        lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    client = QdrantClient(":memory:")
+    client.set_model = MagicMock()
+    configure_client(client)
+    assert "CUDA GPU" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        indexer.onnxruntime, "get_available_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+    client2 = QdrantClient(":memory:")
+    client2.set_model = MagicMock()
+    configure_client(client2)
+    assert "CPU" in capsys.readouterr().out
+
+
 # --- EmbedCache tests ---
 
 from lexausearch.cache import EmbedCache, EMBED_CACHE_COLLECTION

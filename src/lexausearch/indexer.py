@@ -37,7 +37,9 @@ def _cuda_available() -> bool:
 
 
 def configure_client(client: QdrantClient) -> QdrantClient:
-    client.set_model(DENSE_MODEL, cuda=_cuda_available())
+    cuda = _cuda_available()
+    print(f"Dense embeddings: {'CUDA GPU' if cuda else 'CPU'} ({DENSE_MODEL})")
+    client.set_model(DENSE_MODEL, cuda=cuda)
     client.set_sparse_model(SPARSE_MODEL)
     return client
 
