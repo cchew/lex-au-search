@@ -7,9 +7,29 @@ set -euo pipefail
 # the result for download. See README.md's "GPU ingest via Colab" section
 # for the notebook cells that call this script.
 
-pip uninstall -y onnxruntime >/dev/null 2>&1 || true
 pip install -e ".[gpu]"
 pip install huggingface_hub
+
+# The base install above pulls in plain CPU onnxruntime as fastembed's own
+# transitive dependency -- it can't be excluded from the same pip install as
+# the gpu extra, since nothing tells pip the two packages are mutually
+# exclusive for the same "onnxruntime" import namespace. Whichever installs
+# its files last wins, so uninstall the CPU one and force-reinstall
+# onnxruntime-gpu (--no-deps so this step can't pull plain onnxruntime back
+# in) *after* everything else, not before.
+pip uninstall -y onnxruntime
+pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.20"
+
+python3 -c "
+import onnxruntime
+providers = onnxruntime.get_available_providers()
+assert 'CUDAExecutionProvider' in providers, (
+    f'CUDA not available after gpu extra install (providers: {providers}). '
+    'Check Runtime > Change runtime type has a GPU selected, and that '
+    '!nvidia-smi shows a GPU attached.'
+)
+print('CUDA available, providers:', providers)
+"
 
 python3 -c "
 from huggingface_hub import snapshot_download
