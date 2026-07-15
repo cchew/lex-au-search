@@ -14,7 +14,7 @@ Full stack map: this repo's [`STACK.md`](STACK.md) and [lex-au's `FUTURE.md`](ht
 
 ## Versions
 
-- **v0.4.2** - `ingest` auto-detects a CUDA GPU (via `onnxruntime.get_available_providers()`) and uses it if present, falling back to CPU otherwise - same command either way. Install the `gpu` extra to enable it.
+- **v0.4.2** - `ingest` auto-detects a CUDA GPU (via `onnxruntime.get_available_providers()`) and uses it if present, falling back to CPU otherwise - same command either way. Install the `gpu` extra to enable it. Added `scripts/colab_ingest.sh` for running ingest on a free Colab GPU runtime.
 - **v0.4.1** - MCP tool description AX improvements, `STACK.md` discovery doc, fixed stale version string.
 - **v0.4.0** - `client.query_points()` migration, paragraph-level chunking, embedding cache, switched to `BAAI/bge-base-en-v1.5`.
 - **v0.3.0** - Two-collection Qdrant, schedule clause chunking, AU cross-reference extraction, INT8 quantisation, FastMCP auto-exposure.
@@ -44,6 +44,23 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 **First-run model download:** On first ingest, FastEmbed downloads `BAAI/bge-base-en-v1.5` and `Qdrant/bm25` to `~/.cache/fastembed/` (~135 MB total). Subsequent runs skip the download.
 
 **Resuming after interruption:** Qdrant local storage is not transactional at the ingest level - a partial run leaves a corrupt collection. Delete `qdrant_storage/` and re-run `ingest` from scratch.
+
+### GPU ingest via Colab
+
+`scripts/colab_ingest.sh` wraps the full sequence - install the `gpu` extra, download the lex-au corpus from Hugging Face, run `ingest`, zip the result - for a fresh GPU runtime. Paste these cells into a Colab notebook with a GPU runtime (Runtime > Change runtime type > T4 GPU):
+
+```python
+!git clone https://github.com/cchew/lex-au-search.git
+%cd lex-au-search
+!bash scripts/colab_ingest.sh
+```
+
+```python
+from google.colab import files
+files.download("qdrant_storage.zip")
+```
+
+Unzip `qdrant_storage.zip` into `lex-au-search/repo/qdrant_storage/` locally once downloaded. Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes idle - for a corpus this size, the GPU path should comfortably finish inside one session, but if it doesn't, re-run `scripts/colab_ingest.sh` in a fresh session (it deletes and rebuilds `qdrant_storage/` from scratch each time - there is no incremental resume).
 
 ---
 
