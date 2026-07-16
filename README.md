@@ -152,7 +152,7 @@ Response:
 
 - No auth on HTTP API (local use only)
 - `get_act_sections` and `get_act_text` return full Act content - responses exceed LLM context limits for any non-trivial Act; use `search_legislation` for NL queries
-- Social Security (Administration) Act 1999 not indexed - notification obligation provisions fall back to model training data
+- Index covers 2,394 of lex-au's 2,942 Acts (2026-07-16 Colab ingest) - ~550-Act gap not yet diagnosed
 
 ## Under consideration
 
