@@ -55,12 +55,17 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 !bash scripts/colab_ingest.sh
 ```
 
+**Do not use `google.colab.files.download()` to fetch `qdrant_storage.zip`** - it's a browser-mediated transfer that silently truncates/corrupts files in the multi-GB range (confirmed 2026-07-15: bad CRC on the largest collection, undetected until a post-transfer integrity check). Mount Google Drive and copy it there instead, then download from Drive normally (chunked, resumable, no silent corruption):
+
 ```python
-from google.colab import files
-files.download("qdrant_storage.zip")
+from google.colab import drive
+drive.mount("/content/drive")
+!cp qdrant_storage.zip "/content/drive/MyDrive/qdrant_storage.zip"
 ```
 
-Unzip `qdrant_storage.zip` into `lex-au-search/repo/qdrant_storage/` locally once downloaded. Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes idle - for a corpus this size, the GPU path should comfortably finish inside one session, but if it doesn't, re-run `scripts/colab_ingest.sh` in a fresh session (it deletes and rebuilds `qdrant_storage/` from scratch each time - there is no incremental resume).
+Then download `qdrant_storage.zip` from Drive via its web UI or `drive.google.com`, and unzip it into `lex-au-search/repo/qdrant_storage/` locally. Verify the transfer before trusting it: `unzip -t qdrant_storage.zip` should report no CRC errors.
+
+Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes idle - for a corpus this size, the GPU path should comfortably finish inside one session, but if it doesn't, re-run `scripts/colab_ingest.sh` in a fresh session (it deletes and rebuilds `qdrant_storage/` from scratch each time - there is no incremental resume).
 
 ---
 
