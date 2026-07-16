@@ -75,7 +75,7 @@ Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes id
 
 ```bash
 pip install huggingface_hub
-python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns='xml/*')"
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns=['index.json', 'xml/*'])"
 ```
 
 Or build it from source if you need Acts not yet published, or are modifying lex-au itself - see [lex-au](https://github.com/cchew/lex-au):
@@ -138,8 +138,10 @@ Response:
       "frbr_uri": "/akn/au/act/1988/119/eng@2026-01-01",
       "eid": "part-III__sec-16",
       "provision_num": "16",
+      "provision_type": "section",
       "heading": "Interference with privacy of an individual",
       "text": "...",
+      "refs": [],
       "score": 0.847
     }
   ]
@@ -148,7 +150,6 @@ Response:
 
 ## Known limits
 
-- Index is stale against the current lex-au corpus - built against an 11/12-Act snapshot; [lex-au](https://github.com/cchew/lex-au) has since expanded to 539+ Acts. Re-ingest required before search results reflect the full corpus.
 - No auth on HTTP API (local use only)
 - `get_act_sections` and `get_act_text` return full Act content - responses exceed LLM context limits for any non-trivial Act; use `search_legislation` for NL queries
 - Social Security (Administration) Act 1999 not indexed - notification obligation provisions fall back to model training data
