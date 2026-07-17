@@ -106,6 +106,34 @@ def test_chunk_corpus(tmp_path):
     assert all(c.act_name == "Privacy Act 1988" for c in chunks)
 
 
+def test_load_corpus_act_names_reads_index_json(tmp_path):
+    from lexausearch.chunker import load_corpus_act_names
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    index = {
+        "acts": {
+            "privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"},
+            "crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"},
+        }
+    }
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+    result = load_corpus_act_names(corpus_dir)
+    assert result == {"Privacy Act 1988", "Crimes Act 1914"}
+
+
+def test_missing_acts_returns_sorted_names_not_indexed():
+    from lexausearch.chunker import missing_acts
+    corpus_names = {"Privacy Act 1988", "Crimes Act 1914", "Loan Act 1973"}
+    indexed_names = {"Privacy Act 1988"}
+    assert missing_acts(corpus_names, indexed_names) == ["Crimes Act 1914", "Loan Act 1973"]
+
+
+def test_missing_acts_empty_when_fully_indexed():
+    from lexausearch.chunker import missing_acts
+    names = {"Privacy Act 1988"}
+    assert missing_acts(names, names) == []
+
+
 def test_schedule_clauses_extracted(tmp_path):
     from tests.conftest import PRIVACY_ACT_XML_V3, CORPUS_INDEX
     xml_file = tmp_path / "privacy-act-1988.xml"

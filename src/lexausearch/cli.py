@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 from qdrant_client import QdrantClient
 
-from lexausearch.chunker import chunk_corpus
+from lexausearch.chunker import chunk_corpus, load_corpus_act_names, missing_acts
 from lexausearch.indexer import Indexer
 from lexausearch.models import ActRecord
 from lexausearch.searcher import Searcher
@@ -93,7 +93,23 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
         indexer.upsert_chunks(act_chunk_list)
     click.echo(f"  Indexing {len(act_records)} Acts into legislation collection ...")
     indexer.upsert_acts(act_records)
-    click.echo(f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed.")
+
+    corpus_act_names = load_corpus_act_names(corpus_dir)
+    gap = missing_acts(corpus_act_names, set(act_chunks.keys()))
+    if gap:
+        click.echo(
+            f"WARNING: {len(gap)} of {len(corpus_act_names)} corpus Acts produced zero "
+            f"chunks and were not indexed:"
+        )
+        for name in gap[:10]:
+            click.echo(f"  - {name}")
+        if len(gap) > 10:
+            click.echo(f"  ... and {len(gap) - 10} more")
+
+    click.echo(
+        f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed "
+        f"({len(act_records)} of {len(corpus_act_names)} corpus Acts)."
+    )
 
 
 @cli.command()

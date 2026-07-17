@@ -180,6 +180,16 @@ def chunk_xml(
     return chunks
 
 
+def load_corpus_act_names(corpus_dir: Path) -> set[str]:
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    return {entry["name"] for entry in index["acts"].values() if "name" in entry}
+
+
+def missing_acts(corpus_act_names: set[str], indexed_act_names: set[str]) -> list[str]:
+    return sorted(corpus_act_names - indexed_act_names)
+
+
 def chunk_corpus(corpus_dir: Path) -> list[Chunk]:
     index_path = corpus_dir / "index.json"
     index = json.loads(index_path.read_text())
