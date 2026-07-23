@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 from qdrant_client import QdrantClient
 
+from lexausearch.cache import EmbedCache
 from lexausearch.chunker import chunk_corpus, load_corpus_act_names, missing_acts
 from lexausearch.indexer import Indexer
 from lexausearch.models import ActRecord
@@ -50,7 +51,18 @@ def cli() -> None:
     show_default=True,
     help="Path to Qdrant local storage directory",
 )
-def ingest(corpus_dir: Path, storage_dir: Path) -> None:
+@click.option(
+    "--cache-dir",
+    default="./embed_cache_storage",
+    type=click.Path(path_type=Path),
+    show_default=True,
+    help=(
+        "Path to persistent embedding cache directory. Unlike --storage-dir, "
+        "this is never deleted between runs - it accumulates content-addressed "
+        "vectors so re-ingesting unchanged text skips re-embedding."
+    ),
+)
+def ingest(corpus_dir: Path, storage_dir: Path, cache_dir: Path) -> None:
     """Build Qdrant index from lex-au AKN corpus."""
     click.echo(f"Chunking corpus at {corpus_dir} ...")
     chunks = chunk_corpus(corpus_dir)
@@ -84,8 +96,10 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
         ))
 
     click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
+    click.echo(f"Embedding cache: {cache_dir} (persists across runs)")
     client = QdrantClient(path=str(storage_dir))
-    indexer = Indexer(client)
+    cache_client = QdrantClient(path=str(cache_dir))
+    indexer = Indexer(client, cache=EmbedCache(cache_client))
     act_names = list(act_chunks.keys())
     for i, act_name in enumerate(act_names, 1):
         act_chunk_list = act_chunks[act_name]
@@ -109,6 +123,10 @@ def ingest(corpus_dir: Path, storage_dir: Path) -> None:
     click.echo(
         f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed "
         f"({len(act_records)} of {len(corpus_act_names)} corpus Acts)."
+    )
+    click.echo(
+        f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
+        f"({indexer.cache_hits} chunks skipped re-embedding)."
     )
 
 

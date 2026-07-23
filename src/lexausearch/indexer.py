@@ -78,6 +78,8 @@ class Indexer:
     def __init__(self, client: QdrantClient, cache: EmbedCache | None = None) -> None:
         self._client = configure_client(client)
         self._cache = cache
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     def upsert_chunks(self, chunks: list[Chunk]) -> None:
         if not chunks:
@@ -118,6 +120,8 @@ class Indexer:
         # Dense vectors: check cache, embed only misses
         cached = self._cache.get_batch(texts)
         miss_texts = [t for t in texts if t not in cached]
+        self.cache_hits += len(texts) - len(miss_texts)
+        self.cache_misses += len(miss_texts)
         if miss_texts:
             fresh = dict(
                 self._client._embed_documents(

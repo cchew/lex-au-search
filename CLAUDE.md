@@ -18,6 +18,9 @@ pip install -e ".[dev]"
 ## CLI
 
 lex-au-search ingest --corpus-dir ../lex-au/repo/corpus/
+# --storage-dir (default ./qdrant_storage) is fully rebuilt every run - delete before re-running.
+# --cache-dir (default ./embed_cache_storage) is a persistent embedding cache - never delete it;
+# re-ingesting an updated corpus skips re-embedding unchanged Acts' text via this cache.
 lex-au-search serve
 lex-au-search mcp  # requires LEXAU_SEARCH_STORAGE env var
 

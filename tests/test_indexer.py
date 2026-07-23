@@ -219,3 +219,32 @@ def test_indexer_cache_second_ingest_uses_cache(privacy_chunks):
     assert len(cache_hits_before) == len(privacy_chunks)
     # Calling again must not raise
     idx.upsert_chunks(privacy_chunks)
+
+
+def test_indexer_cache_counters_start_at_zero():
+    client = QdrantClient(":memory:")
+    idx = Indexer(client, cache=EmbedCache(client))
+    assert idx.cache_hits == 0
+    assert idx.cache_misses == 0
+
+
+def test_indexer_cache_counters_track_misses_then_hits(privacy_chunks):
+    """First ingest of new text is all misses; re-ingesting the same text is all hits."""
+    client = QdrantClient(":memory:")
+    idx = Indexer(client, cache=EmbedCache(client))
+    idx.upsert_chunks(privacy_chunks)
+    assert idx.cache_misses == len(privacy_chunks)
+    assert idx.cache_hits == 0
+
+    idx.upsert_chunks(privacy_chunks)
+    assert idx.cache_misses == len(privacy_chunks)  # unchanged from first call
+    assert idx.cache_hits == len(privacy_chunks)
+
+
+def test_indexer_no_cache_counters_stay_zero(privacy_chunks):
+    """Without a cache, hit/miss counters are meaningless and stay at zero."""
+    client = QdrantClient(":memory:")
+    idx = Indexer(client)
+    idx.upsert_chunks(privacy_chunks)
+    assert idx.cache_hits == 0
+    assert idx.cache_misses == 0
