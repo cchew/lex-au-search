@@ -52,17 +52,17 @@ def cli() -> None:
     help="Path to Qdrant local storage directory",
 )
 @click.option(
-    "--cache-dir",
-    default="./embed_cache_storage",
+    "--cache-path",
+    default="./embed_cache.db",
     type=click.Path(path_type=Path),
     show_default=True,
     help=(
-        "Path to persistent embedding cache directory. Unlike --storage-dir, "
+        "Path to a persistent SQLite embedding cache file. Unlike --storage-dir, "
         "this is never deleted between runs - it accumulates content-addressed "
         "vectors so re-ingesting unchanged text skips re-embedding."
     ),
 )
-def ingest(corpus_dir: Path, storage_dir: Path, cache_dir: Path) -> None:
+def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     """Build Qdrant index from lex-au AKN corpus."""
     click.echo(f"Chunking corpus at {corpus_dir} ...")
     chunks = chunk_corpus(corpus_dir)
@@ -96,10 +96,9 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_dir: Path) -> None:
         ))
 
     click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
-    click.echo(f"Embedding cache: {cache_dir} (persists across runs)")
+    click.echo(f"Embedding cache: {cache_path} (persists across runs)")
     client = QdrantClient(path=str(storage_dir))
-    cache_client = QdrantClient(path=str(cache_dir))
-    indexer = Indexer(client, cache=EmbedCache(cache_client))
+    indexer = Indexer(client, cache=EmbedCache(cache_path))
     act_names = list(act_chunks.keys())
     for i, act_name in enumerate(act_names, 1):
         act_chunk_list = act_chunks[act_name]

@@ -130,9 +130,7 @@ class Indexer:
                     embed_type="passage",
                 )
             )
-            # Store misses in cache
-            for text, vec in fresh.items():
-                self._cache.put(text, vec)
+            self._cache.put_batch(fresh)
             cached.update(fresh)
 
         # Sparse vectors: always compute (BM25 is fast)

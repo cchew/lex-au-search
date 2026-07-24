@@ -2,7 +2,7 @@
 
 Hybrid semantic search and natural language query over Australian Commonwealth legislation.
 
-**Status: v0.4.2** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
+**Status: v0.4.4** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Uses / used by
 
@@ -14,7 +14,8 @@ Full stack map: this repo's [`STACK.md`](STACK.md) and [lex-au's `FUTURE.md`](ht
 
 ## Versions
 
-- **v0.4.3** - `ingest` gains a persistent, content-addressed embedding cache (`--cache-dir`, default `./embed_cache_storage`) that survives across runs even though `--storage-dir` is still fully rebuilt each time - re-ingesting an updated corpus now skips re-embedding unchanged Acts' text. See "Delta ingest via the embedding cache".
+- **v0.4.4** - Embedding cache (`--cache-path`) rebacked by SQLite instead of a second Qdrant collection, after a Colab GPU ingest OOM'd near the end of the full corpus (confirmed 2026-07-24: Qdrant's own local-mode client warns it's unsuitable above ~20K points; measured ~25x the peak memory of SQLite for the same 100K-vector dataset, independent of HNSW settings). Cache is now a single file (`./embed_cache.db` by default, was a directory).
+- **v0.4.3** - `ingest` gains a persistent, content-addressed embedding cache that survives across runs even though `--storage-dir` is still fully rebuilt each time - re-ingesting an updated corpus now skips re-embedding unchanged Acts' text. See "Delta ingest via the embedding cache".
 - **v0.4.2** - `ingest` auto-detects a CUDA GPU (via `onnxruntime.get_available_providers()`) and uses it if present, falling back to CPU otherwise - same command either way. Install the `gpu` extra to enable it. Added `scripts/colab_ingest.sh` for running ingest on a free Colab GPU runtime.
 - **v0.4.1** - MCP tool description AX improvements, `STACK.md` discovery doc, fixed stale version string.
 - **v0.4.0** - `client.query_points()` migration, paragraph-level chunking, embedding cache, switched to `BAAI/bge-base-en-v1.5`.
@@ -44,7 +45,7 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 
 **First-run model download:** On first ingest, FastEmbed downloads `BAAI/bge-base-en-v1.5` and `Qdrant/bm25` to `~/.cache/fastembed/` (~135 MB total). Subsequent runs skip the download.
 
-**Resuming after interruption:** Qdrant local storage is not transactional at the ingest level - a partial run leaves a corrupt collection. Delete `qdrant_storage/` and re-run `ingest` from scratch. This does **not** apply to `--cache-dir` (default `./embed_cache_storage`) - leave that in place, see "Delta ingest" below.
+**Resuming after interruption:** Qdrant local storage is not transactional at the ingest level - a partial run leaves a corrupt collection. Delete `qdrant_storage/` and re-run `ingest` from scratch. This does **not** apply to `--cache-path` (default `./embed_cache.db`) - leave that in place, see "Delta ingest" below.
 
 ### GPU ingest via Colab
 
@@ -62,17 +63,20 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 from google.colab import drive
 drive.mount("/content/drive")
 !cp qdrant_storage.zip "/content/drive/MyDrive/qdrant_storage.zip"
+!cp embed_cache.zip "/content/drive/MyDrive/embed_cache.zip"
 ```
 
-Then download `qdrant_storage.zip` from Drive via its web UI or `drive.google.com`, and unzip it into `lex-au-search/repo/qdrant_storage/` locally. Verify the transfer before trusting it: `unzip -t qdrant_storage.zip` should report no CRC errors.
+Then download both zips from Drive via its web UI or `drive.google.com`. Unzip `qdrant_storage.zip` into `lex-au-search/repo/qdrant_storage/` and `embed_cache.zip` into `lex-au-search/repo/` (producing `embed_cache.db`). Verify each transfer before trusting it: `unzip -t <file>.zip` should report no CRC errors for both.
 
-Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes idle - for a corpus this size, the GPU path should comfortably finish inside one session, but if it doesn't, re-run `scripts/colab_ingest.sh` in a fresh session (it deletes and rebuilds `qdrant_storage/` from scratch each time - there is no incremental resume for the search index itself). Transfer `embed_cache_storage.zip` via Drive the same way, so a retried session doesn't re-pay for embeddings it already computed.
+Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes idle - for a corpus this size, the GPU path should comfortably finish inside one session, but if it doesn't, re-run `scripts/colab_ingest.sh` in a fresh session (it deletes and rebuilds `qdrant_storage/` from scratch each time - there is no incremental resume for the search index itself). Transfer `embed_cache.zip` via Drive the same way, so a retried session doesn't re-pay for embeddings it already computed.
+
+**Out-of-memory risk on the full corpus:** an early version of the embedding cache (v0.4.3) stored it as a second Qdrant collection, which OOM-killed a Colab run near the end of a full-corpus ingest (confirmed 2026-07-24) - Qdrant's local/embedded mode isn't built for datasets this size regardless of index settings. v0.4.4 replaced it with SQLite, which is ~25x lighter for this access pattern (pure id-keyed lookup, never vector search). If `ingest` still gets `Killed` with no traceback on a free-tier Colab instance, that's the kernel OOM killer - check `!free -h` beforehand and consider a higher-RAM Colab tier.
 
 ### Delta ingest via the embedding cache
 
-`ingest` always re-chunks and re-upserts every Act in `--corpus-dir` into `--storage-dir` - there's no "only process changed Acts" flag, and `--storage-dir` should still be deleted before every run per the resuming-after-interruption note above. What's incremental is the *embedding* step: `--cache-dir` (default `./embed_cache_storage`) is a separate, persistent Qdrant store, keyed by `UUID5(chunk_text)` - a content hash of the exact text being embedded. It is never deleted by `ingest` or `colab_ingest.sh`. Re-running `ingest` against a corpus where most Acts are unchanged produces identical chunk text for those Acts, which hits the cache and skips the (expensive) embedding call entirely - chunking and upserting still happen for every Act, but that's cheap. `ingest`'s final output line reports hit/miss counts so you can see the delta at a glance.
+`ingest` always re-chunks and re-upserts every Act in `--corpus-dir` into `--storage-dir` - there's no "only process changed Acts" flag, and `--storage-dir` should still be deleted before every run per the resuming-after-interruption note above. What's incremental is the *embedding* step: `--cache-path` (default `./embed_cache.db`) is a separate, persistent SQLite file, keyed by `UUID5(chunk_text)` - a content hash of the exact text being embedded. It is never deleted by `ingest` or `colab_ingest.sh`. Re-running `ingest` against a corpus where most Acts are unchanged produces identical chunk text for those Acts, which hits the cache and skips the (expensive) embedding call entirely - chunking and upserting still happen for every Act, but that's cheap. `ingest`'s final output line reports hit/miss counts so you can see the delta at a glance.
 
-This means the practical pattern for re-ingesting after a small corpus update is: keep `embed_cache_storage/` from your last run (don't delete it, unlike `qdrant_storage/`), point `--cache-dir` at it, and re-run `ingest` against the current corpus. On a persistent machine this needs no extra steps - the cache just accumulates on disk across runs. Moving the cache to a new machine (e.g. bootstrapping a laptop from a one-off Colab GPU run) just needs `embed_cache_storage/` copied over once, same as `qdrant_storage/`.
+This means the practical pattern for re-ingesting after a small corpus update is: keep `embed_cache.db` from your last run (don't delete it, unlike `qdrant_storage/`), point `--cache-path` at it, and re-run `ingest` against the current corpus. On a persistent machine this needs no extra steps - the cache just accumulates on disk across runs. Moving the cache to a new machine (e.g. bootstrapping a laptop from a one-off Colab GPU run) just needs `embed_cache.db` copied over once, same as `qdrant_storage/`.
 
 ---
 

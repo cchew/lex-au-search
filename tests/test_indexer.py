@@ -140,43 +140,31 @@ def test_configure_client_prints_which_backend_is_used(monkeypatch, capsys):
 
 
 # --- EmbedCache tests ---
+#
+# Backed by SQLite (":memory:" for tests), not Qdrant - see cache.py's
+# docstring. Cache storage is independent of the Indexer's Qdrant client.
 
-from lexausearch.cache import EmbedCache, EMBED_CACHE_COLLECTION
-
-
-def test_embed_cache_creation():
-    client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
-    info = client.get_collection(EMBED_CACHE_COLLECTION)
-    assert info is not None
+from lexausearch.cache import EmbedCache
 
 
 def test_embed_cache_cold_miss():
-    client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     assert cache.get("some text") is None
 
 
 def test_embed_cache_put_get_roundtrip():
-    import math
-    client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     vector = [0.1] * 768
     cache.put("hello world", vector)
     result = cache.get("hello world")
     assert result is not None
     assert len(result) == 768
-    # COSINE collections normalise vectors on store; check same direction via dot product ≈ 1
-    norm_a = math.sqrt(sum(v ** 2 for v in vector))
-    norm_b = math.sqrt(sum(v ** 2 for v in result))
-    dot = sum(a * b for a, b in zip(vector, result))
-    cosine_sim = dot / (norm_a * norm_b)
-    assert abs(cosine_sim - 1.0) < 1e-4
+    for a, b in zip(vector, result):
+        assert abs(a - b) < 1e-6
 
 
 def test_embed_cache_get_batch():
-    client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     cache.put("text one", [0.1] * 768)
     cache.put("text two", [0.2] * 768)
     hits = cache.get_batch(["text one", "text two", "text three"])
@@ -185,19 +173,33 @@ def test_embed_cache_get_batch():
     assert "text three" not in hits
 
 
+def test_embed_cache_put_batch():
+    cache = EmbedCache(":memory:")
+    cache.put_batch({"text one": [0.1] * 768, "text two": [0.2] * 768})
+    hits = cache.get_batch(["text one", "text two"])
+    assert len(hits) == 2
+
+
 def test_embed_cache_uuid5_deterministic():
-    client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     # Same text → same UUID
     assert cache._cache_id("hello") == cache._cache_id("hello")
     # Different text → different UUID
     assert cache._cache_id("hello") != cache._cache_id("world")
 
 
+def test_embed_cache_persists_to_file(tmp_path):
+    """Unlike Qdrant local mode, a real file path must survive a fresh connection."""
+    db_path = tmp_path / "embed_cache.db"
+    EmbedCache(db_path).put("hello", [0.5] * 768)
+    reopened = EmbedCache(db_path)
+    assert reopened.get("hello") is not None
+
+
 def test_indexer_with_cache_smoke(privacy_chunks):
     """Cache-enabled upsert_chunks runs without error and results are searchable."""
     client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     idx = Indexer(client, cache=cache)
     idx.upsert_chunks(privacy_chunks)
     results = client.scroll(
@@ -209,7 +211,7 @@ def test_indexer_with_cache_smoke(privacy_chunks):
 def test_indexer_cache_second_ingest_uses_cache(privacy_chunks):
     """Second upsert_chunks with same texts skips embedding (cache hits)."""
     client = QdrantClient(":memory:")
-    cache = EmbedCache(client)
+    cache = EmbedCache(":memory:")
     idx = Indexer(client, cache=cache)
     idx.upsert_chunks(privacy_chunks)
     # Populate cache from first run; second run should use only cached vectors
@@ -223,7 +225,7 @@ def test_indexer_cache_second_ingest_uses_cache(privacy_chunks):
 
 def test_indexer_cache_counters_start_at_zero():
     client = QdrantClient(":memory:")
-    idx = Indexer(client, cache=EmbedCache(client))
+    idx = Indexer(client, cache=EmbedCache(":memory:"))
     assert idx.cache_hits == 0
     assert idx.cache_misses == 0
 
@@ -231,7 +233,7 @@ def test_indexer_cache_counters_start_at_zero():
 def test_indexer_cache_counters_track_misses_then_hits(privacy_chunks):
     """First ingest of new text is all misses; re-ingesting the same text is all hits."""
     client = QdrantClient(":memory:")
-    idx = Indexer(client, cache=EmbedCache(client))
+    idx = Indexer(client, cache=EmbedCache(":memory:"))
     idx.upsert_chunks(privacy_chunks)
     assert idx.cache_misses == len(privacy_chunks)
     assert idx.cache_hits == 0

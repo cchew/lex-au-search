@@ -36,12 +36,12 @@ from huggingface_hub import snapshot_download
 snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns=['index.json', 'xml/*'])
 "
 
-# Only qdrant_storage is wiped - embed_cache_storage is a persistent,
-# content-addressed embedding cache that must survive across runs (and across
+# Only qdrant_storage is wiped - embed_cache.db is a persistent, content-
+# addressed embedding cache (SQLite) that must survive across runs (and across
 # machines) to skip re-embedding unchanged text on future delta ingests.
 rm -rf qdrant_storage
-lex-au-search ingest --corpus-dir corpus/ --storage-dir ./qdrant_storage --cache-dir ./embed_cache_storage
+lex-au-search ingest --corpus-dir corpus/ --storage-dir ./qdrant_storage --cache-path ./embed_cache.db
 
 zip -qr qdrant_storage.zip qdrant_storage
-zip -qr embed_cache_storage.zip embed_cache_storage
-echo "Done. qdrant_storage.zip and embed_cache_storage.zip are ready to download."
+zip -q embed_cache.zip embed_cache.db
+echo "Done. qdrant_storage.zip and embed_cache.zip are ready to download."

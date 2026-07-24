@@ -27,14 +27,14 @@ def test_ingest_second_run_reports_cache_hits(tmp_path):
     corpus_dir.mkdir()
     _write_corpus(corpus_dir)
     storage_dir = tmp_path / "qdrant_storage"
-    cache_dir = tmp_path / "embed_cache_storage"
+    cache_path = tmp_path / "embed_cache.db"
 
     runner = CliRunner()
     args = [
         "ingest",
         "--corpus-dir", str(corpus_dir),
         "--storage-dir", str(storage_dir),
-        "--cache-dir", str(cache_dir),
+        "--cache-path", str(cache_path),
     ]
 
     first = runner.invoke(cli, args)
