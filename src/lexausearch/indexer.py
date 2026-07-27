@@ -7,6 +7,7 @@ import onnxruntime
 from qdrant_client import QdrantClient
 from qdrant_client import models as qmodels
 from qdrant_client.models import (
+    HnswConfigDiff,
     ScalarQuantization,
     ScalarQuantizationConfig,
     ScalarType,
@@ -27,7 +28,7 @@ _QUANT_CONFIG = ScalarQuantization(
     scalar=ScalarQuantizationConfig(
         type=ScalarType.INT8,
         quantile=0.99,
-        always_ram=True,
+        always_ram=False,
     )
 )
 
@@ -48,8 +49,10 @@ def _ensure_collection(client: QdrantClient, name: str) -> None:
     try:
         client.create_collection(
             collection_name=name,
-            vectors_config=client.get_fastembed_vector_params(on_disk=False),
-            sparse_vectors_config=client.get_fastembed_sparse_vector_params(on_disk=False),
+            vectors_config=client.get_fastembed_vector_params(
+                on_disk=True, hnsw_config=HnswConfigDiff(on_disk=True)
+            ),
+            sparse_vectors_config=client.get_fastembed_sparse_vector_params(on_disk=True),
             quantization_config=_QUANT_CONFIG,
         )
     except Exception:
