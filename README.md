@@ -2,7 +2,7 @@
 
 Hybrid semantic search and natural language query over Australian Commonwealth legislation.
 
-**Status: v0.4.4** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
+**Status: v0.4.5** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Uses / used by
 
@@ -164,8 +164,8 @@ Response:
 
 - No auth on HTTP API (local use only)
 - `get_act_sections` and `get_act_text` return full Act content - responses exceed LLM context limits for any non-trivial Act; use `search_legislation` for NL queries
-- Index covers 2,394 of lex-au's 2,942 Acts (2026-07-16 Colab ingest) - ~550-Act gap not yet diagnosed
-- Full re-ingest against the current ~3,078-Act corpus OOM-kills on Colab free tier (12.7GB) at the same point every run (~2,920/3,069 Acts). Root cause confirmed 2026-07-27: Qdrant's local/embedded mode always keeps the full vector set resident in RAM, with no working on-disk option. Next fix is a sharded ingest (batch Acts into separate local collections, merge after) - not yet built.
+- Index covers 2,394 Acts from a 2026-07-16 Colab ingest, against lex-au's corpus at that time (2,942 Acts) - ~550-Act gap not yet diagnosed
+- Full re-ingest against lex-au's current corpus (3,078 Acts as of v0.7.5, 2026-07-22) OOM-kills on Colab free tier (12.7GB) at the same point every run (~2,920 of ~3,078 Acts processed). Root cause confirmed 2026-07-27: Qdrant's local/embedded mode always keeps the full vector set resident in RAM, with no working on-disk option. Next fix is a sharded ingest (batch Acts into separate local collections, merge after) - not yet built.
 
 ## Under consideration
 
