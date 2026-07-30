@@ -2,6 +2,8 @@
 
 Hybrid semantic search and natural language query over Australian Commonwealth legislation.
 
+[search.gov.au](https://search.gov.au)'s Find stream (Department of Finance, alpha — see [Government content is AI food](https://www.youtube.com/watch?v=X5UAWFl7-FE), APS Digital Profession Innovation Month, July 2026) does the same job at whole-of-government scale, backed by an internal OpenSearch index and GovAI.
+
 **Status: v0.4.5** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
 
 ## Uses / used by
