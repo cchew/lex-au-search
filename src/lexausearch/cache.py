@@ -25,13 +25,45 @@ class EmbedCache:
     The cache is optional: Indexer falls back to client.add() when cache=None.
     """
 
-    def __init__(self, db_path: str | Path, vector_size: int = DENSE_VECTOR_SIZE) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        vector_size: int = DENSE_VECTOR_SIZE,
+        model_name: str | None = None,
+    ) -> None:
         self._vector_size = vector_size
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS embed_cache (id TEXT PRIMARY KEY, vector BLOB NOT NULL)"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         self._conn.commit()
+        if model_name is not None:
+            self._check_or_record_model_name(model_name)
+
+    def _check_or_record_model_name(self, model_name: str) -> None:
+        """Guard against silently serving vectors from a different model than
+        the one currently configured - EmbedCache's SQLite rows carry no
+        dimension or model tag on the vector itself, so a switched DENSE_MODEL
+        with a reused --cache-path would otherwise mix incompatible vector
+        spaces into one Qdrant collection without any error."""
+        row = self._conn.execute(
+            "SELECT value FROM cache_meta WHERE key = 'model_name'"
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO cache_meta VALUES ('model_name', ?)", (model_name,)
+            )
+            self._conn.commit()
+        elif row[0] != model_name:
+            raise ValueError(
+                f"embed cache at this path was built with model {row[0]!r}, "
+                f"not {model_name!r} - use a fresh --cache-path when changing "
+                f"the embedding model; cached vectors are not compatible "
+                f"across models"
+            )
 
     def _cache_id(self, text: str) -> str:
         return str(uuid.uuid5(_UUID5_NS, text))

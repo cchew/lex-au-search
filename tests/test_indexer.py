@@ -196,6 +196,36 @@ def test_embed_cache_persists_to_file(tmp_path):
     assert reopened.get("hello") is not None
 
 
+def test_embed_cache_records_model_name_on_first_use():
+    cache = EmbedCache(":memory:", model_name="snowflake/snowflake-arctic-embed-l")
+    row = cache._conn.execute(
+        "SELECT value FROM cache_meta WHERE key = 'model_name'"
+    ).fetchone()
+    assert row[0] == "snowflake/snowflake-arctic-embed-l"
+
+
+def test_embed_cache_allows_reopening_with_same_model_name(tmp_path):
+    db_path = tmp_path / "embed_cache.db"
+    EmbedCache(db_path, model_name="snowflake/snowflake-arctic-embed-l").put("hello", [0.1] * 1024)
+    reopened = EmbedCache(db_path, model_name="snowflake/snowflake-arctic-embed-l")
+    assert reopened.get("hello") is not None
+
+
+def test_embed_cache_rejects_model_name_mismatch(tmp_path):
+    db_path = tmp_path / "embed_cache.db"
+    EmbedCache(db_path, model_name="BAAI/bge-base-en-v1.5")
+    with pytest.raises(ValueError, match="not 'snowflake"):
+        EmbedCache(db_path, model_name="snowflake/snowflake-arctic-embed-l")
+
+
+def test_embed_cache_no_model_name_skips_check(tmp_path):
+    """Backward-compatible: omitting model_name never raises, even against a
+    cache file that already has a recorded model name."""
+    db_path = tmp_path / "embed_cache.db"
+    EmbedCache(db_path, model_name="BAAI/bge-base-en-v1.5")
+    EmbedCache(db_path)  # must not raise
+
+
 def test_indexer_with_cache_smoke(privacy_chunks):
     """Cache-enabled upsert_chunks runs without error and results are searchable."""
     client = QdrantClient(":memory:")
