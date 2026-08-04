@@ -10,7 +10,7 @@ from qdrant_client import QdrantClient
 from lexausearch.cache import EmbedCache
 from lexausearch.chunker import chunk_corpus, load_corpus_act_names, missing_acts
 from lexausearch.indexer import DENSE_MODEL, Indexer
-from lexausearch.models import ActRecord
+from lexausearch.models import ActRecord, Chunk
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
 from lexausearch.mcp import run_mcp_server
@@ -37,35 +37,10 @@ def cli() -> None:
     pass
 
 
-@cli.command()
-@click.option(
-    "--corpus-dir",
-    required=True,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    help="Path to lex-au corpus directory (contains index.json and xml/)",
-)
-@click.option(
-    "--storage-dir",
-    default="./qdrant_storage",
-    type=click.Path(path_type=Path),
-    show_default=True,
-    help="Path to Qdrant local storage directory",
-)
-@click.option(
-    "--cache-path",
-    default="./embed_cache.db",
-    type=click.Path(path_type=Path),
-    show_default=True,
-    help=(
-        "Path to a persistent SQLite embedding cache file. Unlike --storage-dir, "
-        "this is never deleted between runs - it accumulates content-addressed "
-        "vectors so re-ingesting unchanged text skips re-embedding."
-    ),
-)
-def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
-    """Build Qdrant index from lex-au AKN corpus."""
-    click.echo(f"Chunking corpus at {corpus_dir} ...")
-    chunks = chunk_corpus(corpus_dir)
+def _run_ingest(
+    chunks: list[Chunk], storage_dir: Path, cache_path: Path, gap_check_names: set[str]
+) -> None:
+    """Shared indexing + reporting logic for `ingest` and `ingest-shard`."""
     sections = [c for c in chunks if c.provision_type == "section"]
     subsections = [c for c in chunks if c.provision_type == "subsection"]
     clauses = [c for c in chunks if c.provision_type == "schedule_clause"]
@@ -107,11 +82,10 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     click.echo(f"  Indexing {len(act_records)} Acts into legislation collection ...")
     indexer.upsert_acts(act_records)
 
-    corpus_act_names = load_corpus_act_names(corpus_dir)
-    gap = missing_acts(corpus_act_names, set(act_chunks.keys()))
+    gap = missing_acts(gap_check_names, set(act_chunks.keys()))
     if gap:
         click.echo(
-            f"WARNING: {len(gap)} of {len(corpus_act_names)} corpus Acts produced zero "
+            f"WARNING: {len(gap)} of {len(gap_check_names)} Acts produced zero "
             f"chunks and were not indexed:"
         )
         for name in gap[:10]:
@@ -121,12 +95,45 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
 
     click.echo(
         f"Done. {len(chunks)} chunks + {len(act_records)} Act records indexed "
-        f"({len(act_records)} of {len(corpus_act_names)} corpus Acts)."
+        f"({len(act_records)} of {len(gap_check_names)} Acts)."
     )
     click.echo(
         f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
         f"({indexer.cache_hits} chunks skipped re-embedding)."
     )
+
+
+@cli.command()
+@click.option(
+    "--corpus-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Path to lex-au corpus directory (contains index.json and xml/)",
+)
+@click.option(
+    "--storage-dir",
+    default="./qdrant_storage",
+    type=click.Path(path_type=Path),
+    show_default=True,
+    help="Path to Qdrant local storage directory",
+)
+@click.option(
+    "--cache-path",
+    default="./embed_cache.db",
+    type=click.Path(path_type=Path),
+    show_default=True,
+    help=(
+        "Path to a persistent SQLite embedding cache file. Unlike --storage-dir, "
+        "this is never deleted between runs - it accumulates content-addressed "
+        "vectors so re-ingesting unchanged text skips re-embedding."
+    ),
+)
+def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
+    """Build Qdrant index from lex-au AKN corpus."""
+    click.echo(f"Chunking corpus at {corpus_dir} ...")
+    chunks = chunk_corpus(corpus_dir)
+    corpus_act_names = load_corpus_act_names(corpus_dir)
+    _run_ingest(chunks, storage_dir, cache_path, corpus_act_names)
 
 
 @cli.command()
