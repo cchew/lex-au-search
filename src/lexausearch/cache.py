@@ -108,3 +108,21 @@ class EmbedCache:
             id_to_text[row_id]: np.frombuffer(vec, dtype=np.float32).tolist()
             for row_id, vec in rows
         }
+
+
+def merge_cache_files(shard_cache_paths: list[Path | str], output_cache_path: Path | str) -> int:
+    """Merge multiple SQLite embed_cache.db files into one. Content-addressed
+    UUID5 keys mean the same text embedded in two shards collapses to one
+    row via INSERT OR REPLACE. Returns the number of (pre-dedup) rows read."""
+    output = EmbedCache(output_cache_path)
+    total_rows_read = 0
+    for shard_path in shard_cache_paths:
+        conn = sqlite3.connect(str(shard_path))
+        rows = conn.execute("SELECT id, vector FROM embed_cache").fetchall()
+        conn.close()
+        output._conn.executemany(
+            "INSERT OR REPLACE INTO embed_cache VALUES (?, ?)", rows
+        )
+        total_rows_read += len(rows)
+    output._conn.commit()
+    return total_rows_read

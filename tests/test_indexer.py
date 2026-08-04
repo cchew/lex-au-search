@@ -293,6 +293,44 @@ def test_embed_cache_no_model_name_skips_check(tmp_path):
     EmbedCache(db_path)  # must not raise
 
 
+def test_merge_cache_files_combines_two_shard_caches(tmp_path):
+    from lexausearch.cache import merge_cache_files
+
+    cache_a_path = tmp_path / "shard0_cache.db"
+    EmbedCache(cache_a_path).put("first text", [0.1] * 1024)
+
+    cache_b_path = tmp_path / "shard1_cache.db"
+    EmbedCache(cache_b_path).put("second text", [0.2] * 1024)
+
+    output_path = tmp_path / "merged_cache.db"
+    total = merge_cache_files([cache_a_path, cache_b_path], output_path)
+
+    assert total == 2
+    merged = EmbedCache(output_path)
+    assert merged.get("first text") is not None
+    assert merged.get("second text") is not None
+
+
+def test_merge_cache_files_same_text_across_shards_dedupes(tmp_path):
+    """UUID5 keys are content-addressed - the same text embedded in two
+    shards must merge to one row, not two, since it's the same key."""
+    from lexausearch.cache import merge_cache_files
+
+    cache_a_path = tmp_path / "shard0_cache.db"
+    EmbedCache(cache_a_path).put("shared text", [0.1] * 1024)
+
+    cache_b_path = tmp_path / "shard1_cache.db"
+    EmbedCache(cache_b_path).put("shared text", [0.1] * 1024)
+
+    output_path = tmp_path / "merged_cache.db"
+    merge_cache_files([cache_a_path, cache_b_path], output_path)
+
+    import sqlite3
+    conn = sqlite3.connect(str(output_path))
+    row_count = conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
+    assert row_count == 1
+
+
 def test_indexer_with_cache_smoke(privacy_chunks):
     """Cache-enabled upsert_chunks runs without error and results are searchable."""
     client = QdrantClient(":memory:")
