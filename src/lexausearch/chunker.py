@@ -190,6 +190,29 @@ def missing_acts(corpus_act_names: set[str], indexed_act_names: set[str]) -> lis
     return sorted(corpus_act_names - indexed_act_names)
 
 
+def load_corpus_act_entries(corpus_dir: Path) -> list[dict]:
+    """Ordered list of index.json's act entries (name + xml_path), in the
+    dict's stable insertion order - the same order chunk_corpus() iterates,
+    so shard slicing stays deterministic across runs of the same file."""
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    return [entry for entry in index["acts"].values() if "name" in entry]
+
+
+def shard_count(total_acts: int, shard_size: int) -> int:
+    """Number of shards (ceiling division) needed to cover total_acts."""
+    if shard_size <= 0:
+        raise ValueError("shard_size must be positive")
+    return -(-total_acts // shard_size)
+
+
+def shard_bounds(total_acts: int, shard_index: int, shard_size: int) -> tuple[int, int]:
+    """[start, end) Act-list slice bounds for shard_index, clipped to total_acts."""
+    start = min(shard_index * shard_size, total_acts)
+    end = min(start + shard_size, total_acts)
+    return (start, end)
+
+
 def chunk_corpus(corpus_dir: Path) -> list[Chunk]:
     index_path = corpus_dir / "index.json"
     index = json.loads(index_path.read_text())

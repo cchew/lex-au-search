@@ -281,3 +281,49 @@ def test_refs_populated_from_text(tmp_path):
     chunks = chunk_xml(xml_file, "Privacy Act 1988", CORPUS_INDEX)
     assert chunks[0].refs  # non-empty
     assert "#sec-6" in chunks[0].refs
+
+
+def test_shard_count_exact_division():
+    from lexausearch.chunker import shard_count
+    assert shard_count(900, 300) == 3
+
+
+def test_shard_count_rounds_up_partial_shard():
+    from lexausearch.chunker import shard_count
+    assert shard_count(3078, 300) == 11  # 10 full shards + 78 Acts
+
+
+def test_shard_count_rejects_non_positive_shard_size():
+    from lexausearch.chunker import shard_count
+    with pytest.raises(ValueError):
+        shard_count(100, 0)
+
+
+def test_shard_bounds_middle_shard():
+    from lexausearch.chunker import shard_bounds
+    assert shard_bounds(3078, 1, 300) == (300, 600)
+
+
+def test_shard_bounds_last_partial_shard():
+    from lexausearch.chunker import shard_bounds
+    assert shard_bounds(3078, 10, 300) == (3000, 3078)
+
+
+def test_shard_bounds_index_past_end_is_empty():
+    from lexausearch.chunker import shard_bounds
+    assert shard_bounds(3078, 11, 300) == (3078, 3078)
+
+
+def test_load_corpus_act_entries_preserves_index_json_order(tmp_path):
+    from lexausearch.chunker import load_corpus_act_entries
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    index = {
+        "acts": {
+            "crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"},
+            "privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"},
+        }
+    }
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+    entries = load_corpus_act_entries(corpus_dir)
+    assert [e["name"] for e in entries] == ["Crimes Act 1914", "Privacy Act 1988"]
