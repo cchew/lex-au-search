@@ -206,3 +206,50 @@ class Indexer:
             ],
             batch_size=32,
         )
+
+
+def merge_shard_clients(
+    shard_clients: list[QdrantClient], output_client: QdrantClient, batch_size: int = 500
+) -> dict[str, int]:
+    """Batch scroll+upsert every point from each shard client's collections
+    into output_client's collections. Reuses _ensure_collection /
+    _create_payload_indexes so quantization/HNSW/payload-index config
+    matches a normal single-run ingest exactly. Bounded memory: never holds
+    more than batch_size points across all shards at once."""
+    configure_client(output_client)
+    _ensure_collection(output_client, COLLECTION_SECTIONS)
+    _create_payload_indexes(
+        output_client, COLLECTION_SECTIONS, ["act_name", "frbr_uri", "provision_type"]
+    )
+    _ensure_collection(output_client, COLLECTION_ACTS)
+    _create_payload_indexes(output_client, COLLECTION_ACTS, ["act_name", "frbr_uri", "year"])
+
+    totals = {"sections": 0, "acts": 0}
+    collection_keys = [(COLLECTION_SECTIONS, "sections"), (COLLECTION_ACTS, "acts")]
+    for shard_client in shard_clients:
+        for collection, key in collection_keys:
+            if not shard_client.collection_exists(collection):
+                continue  # shard never upserted to this collection, nothing to merge
+            offset = None
+            while True:
+                points, offset = shard_client.scroll(
+                    collection_name=collection,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                if not points:
+                    break
+                output_client.upsert(
+                    collection_name=collection,
+                    points=[
+                        qmodels.PointStruct(id=p.id, vector=p.vector, payload=p.payload)
+                        for p in points
+                    ],
+                    wait=True,
+                )
+                totals[key] += len(points)
+                if offset is None:
+                    break
+    return totals

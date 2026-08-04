@@ -139,6 +139,73 @@ def test_configure_client_prints_which_backend_is_used(monkeypatch, capsys):
     assert "CPU" in capsys.readouterr().out
 
 
+def test_merge_shard_clients_combines_two_shards():
+    from lexausearch.indexer import merge_shard_clients
+
+    shard_a = QdrantClient(":memory:")
+    idx_a = Indexer(shard_a)
+    idx_a.upsert_chunks([_chunk(eid="sec-6", act_name="Privacy Act 1988")])
+    idx_a.upsert_acts([_act_record()])
+
+    shard_b = QdrantClient(":memory:")
+    idx_b = Indexer(shard_b)
+    idx_b.upsert_chunks([_chunk(eid="sec-3", act_name="Crimes Act 1914",
+                                 frbr_uri="/akn/au/act/1914/6/eng@2026-01-01")])
+    idx_b.upsert_acts([ActRecord(
+        act_name="Crimes Act 1914", frbr_uri="/akn/au/act/1914/6/eng@2026-01-01",
+        year=1914, as_at_date="2026-01-01", section_count=1, schedule_clause_count=0,
+    )])
+
+    output = QdrantClient(":memory:")
+    totals = merge_shard_clients([shard_a, shard_b], output)
+
+    assert totals == {"sections": 2, "acts": 2}
+    section_points = output.scroll(collection_name=COLLECTION_SECTIONS, limit=10, with_payload=True)[0]
+    act_names = {p.payload["act_name"] for p in section_points}
+    assert act_names == {"Privacy Act 1988", "Crimes Act 1914"}
+
+
+def test_merge_shard_clients_preserves_vectors():
+    """A merged point's dense vector must round-trip, not just its payload -
+    the whole point of merging is not needing to re-embed."""
+    from lexausearch.indexer import merge_shard_clients
+
+    shard_a = QdrantClient(":memory:")
+    Indexer(shard_a).upsert_chunks([_chunk()])
+
+    output = QdrantClient(":memory:")
+    merge_shard_clients([shard_a], output)
+
+    source_points = shard_a.scroll(collection_name=COLLECTION_SECTIONS, limit=10, with_vectors=True)[0]
+    merged_points = output.scroll(collection_name=COLLECTION_SECTIONS, limit=10, with_vectors=True)[0]
+    assert len(merged_points) == 1
+    dense_field = configure_client(shard_a).get_vector_field_name()
+    source_vec = source_points[0].vector[dense_field]
+    merged_vec = merged_points[0].vector[dense_field]
+    assert source_vec == merged_vec
+
+
+def test_merge_shard_clients_batches_across_page_boundary():
+    """With batch_size=1 and 3 chunks, scroll pagination must not drop or
+    duplicate any point - the real risk with an off-by-one in offset handling."""
+    from lexausearch.indexer import merge_shard_clients
+
+    shard = QdrantClient(":memory:")
+    idx = Indexer(shard)
+    idx.upsert_chunks([
+        _chunk(eid="sec-1", text="first provision text here"),
+        _chunk(eid="sec-2", text="second provision text here"),
+        _chunk(eid="sec-3", text="third provision text here"),
+    ])
+
+    output = QdrantClient(":memory:")
+    totals = merge_shard_clients([shard], output, batch_size=1)
+
+    assert totals["sections"] == 3
+    merged = output.scroll(collection_name=COLLECTION_SECTIONS, limit=10)[0]
+    assert len(merged) == 3
+
+
 # --- EmbedCache tests ---
 #
 # Backed by SQLite (":memory:" for tests), not Qdrant - see cache.py's
