@@ -28,9 +28,31 @@ assert 'CUDAExecutionProvider' in providers, (
 print('CUDA available, providers:', providers)
 "
 
+# Download only index.json first, then only THIS shard's XML files - not
+# the whole ~3,078-Act corpus. Found running the real 5-Act smoke test
+# (2026-08-04): downloading the full corpus took 13+ minutes and hit HF
+# rate-limiting even for a 5-Act shard; at production shard-size 300 across
+# 11 shards, downloading the full corpus on every shard would mean ~11x
+# redundant full-corpus downloads. lexausearch is already importable here
+# (pip install -e above), so reuse the same shard-slicing logic ingest-shard
+# itself uses, rather than re-deriving it.
 python3 -c "
 from huggingface_hub import snapshot_download
-snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns=['index.json', 'xml/*'])
+snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns=['index.json'])
+"
+
+python3 -c "
+from pathlib import Path
+from huggingface_hub import snapshot_download
+from lexausearch.chunker import load_corpus_act_entries, shard_bounds
+
+corpus_dir = Path('corpus')
+entries = load_corpus_act_entries(corpus_dir)
+start, end = shard_bounds(len(entries), $SHARD_INDEX, $SHARD_SIZE)
+xml_paths = [e['xml_path'] for e in entries[start:end]]
+print(f'Shard needs {len(xml_paths)} XML files (Acts [{start}:{end}] of {len(entries)})')
+if xml_paths:
+    snapshot_download(repo_id='cchew/lex-au', repo_type='dataset', local_dir='corpus', allow_patterns=xml_paths)
 "
 
 rm -rf shard_storage
