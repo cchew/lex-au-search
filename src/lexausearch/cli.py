@@ -8,7 +8,10 @@ import click
 from qdrant_client import QdrantClient
 
 from lexausearch.cache import EmbedCache
-from lexausearch.chunker import chunk_corpus, load_corpus_act_names, missing_acts
+from lexausearch.chunker import (
+    chunk_corpus, chunk_corpus_for_acts, load_corpus_act_names,
+    load_corpus_act_entries, shard_bounds, missing_acts,
+)
 from lexausearch.indexer import DENSE_MODEL, Indexer
 from lexausearch.models import ActRecord, Chunk
 from lexausearch.searcher import Searcher
@@ -134,6 +137,55 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     chunks = chunk_corpus(corpus_dir)
     corpus_act_names = load_corpus_act_names(corpus_dir)
     _run_ingest(chunks, storage_dir, cache_path, corpus_act_names)
+
+
+@cli.command(name="ingest-shard")
+@click.option(
+    "--corpus-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Path to lex-au corpus directory (contains index.json and xml/)",
+)
+@click.option(
+    "--storage-dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Shard-local Qdrant storage directory (not shared across shards)",
+)
+@click.option(
+    "--cache-path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Shard-local embedding cache path (merged into a master cache by merge-shards)",
+)
+@click.option("--shard-index", required=True, type=int, help="0-based shard index")
+@click.option("--shard-size", required=True, type=int, help="Acts per shard")
+def ingest_shard(
+    corpus_dir: Path, storage_dir: Path, cache_path: Path, shard_index: int, shard_size: int
+) -> None:
+    """Chunk + index only one Act-count slice of the corpus (bounded memory).
+
+    Acts are sliced from index.json's stable order: shard N covers Acts
+    [N*shard_size : (N+1)*shard_size). Run once per shard, each in its own
+    process (ideally its own VM) so memory never accumulates across the
+    whole corpus.
+    """
+    entries = load_corpus_act_entries(corpus_dir)
+    start, end = shard_bounds(len(entries), shard_index, shard_size)
+    shard_entries = entries[start:end]
+    if not shard_entries:
+        click.echo(
+            f"Shard {shard_index} is empty (corpus has {len(entries)} Acts, "
+            f"shard-size {shard_size}); nothing to do."
+        )
+        return
+    shard_act_names = {e["name"] for e in shard_entries}
+    click.echo(
+        f"Shard {shard_index}: Acts [{start}:{end}] of {len(entries)} "
+        f"({len(shard_act_names)} Acts) ..."
+    )
+    chunks = chunk_corpus_for_acts(corpus_dir, shard_act_names)
+    _run_ingest(chunks, storage_dir, cache_path, shard_act_names)
 
 
 @cli.command()
