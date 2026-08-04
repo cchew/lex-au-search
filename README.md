@@ -5,7 +5,7 @@ Hybrid semantic search and natural language query over Australian Commonwealth l
 > [!NOTE]
 > [search.gov.au](https://search.gov.au)'s Find stream (Department of Finance, alpha — see [Government content is AI food](https://www.youtube.com/watch?v=X5UAWFl7-FE), APS Digital Profession Innovation Month, July 2026) does the same job at whole-of-government scale, backed by an internal OpenSearch index and GovAI.
 
-**Status: v0.4.5** - localhost only with no external APIs. Embedding model: `BAAI/bge-base-en-v1.5` (local ONNX, 768-dim, 512-token context).
+**Status: v0.4.6** - localhost only with no external APIs. Embedding model: `snowflake/snowflake-arctic-embed-l` (local ONNX, 1024-dim, 512-token context).
 
 ## Uses / used by
 
@@ -17,6 +17,7 @@ Full stack map: this repo's [`STACK.md`](STACK.md) and [lex-au's `FUTURE.md`](ht
 
 ## Versions
 
+- **v0.4.6** - Switched dense embedding model from `BAAI/bge-base-en-v1.5` (BAAI/Beijing-origin) to `snowflake/snowflake-arctic-embed-l` (Apache-2.0, Snowflake) - already validated in this project's Gate 1A legal-embedding-experiments to beat BGE zero-shot on a legal-rag-bench proxy with no finetuning (0.3603 vs 0.1731 NDCG@10). 768→1024-dim; requires a full re-embed regardless (the embedding cache was never seeded under any model, so there was no delta path to preserve). `EmbedCache` now records which model built it and refuses to silently reuse vectors from a mismatched model on a shared `--cache-path`.
 - **v0.4.5** - Attempted fix for the Colab OOM on full-corpus ingest: set `on_disk=True` / `always_ram=False` on the `legislation_section` collection's vector, sparse, HNSW, and quantization config. Confirmed ineffective (2026-07-27, same crash point, identical RAM curve) - Qdrant's local/embedded Python client never implements on-disk vector storage regardless of config; `local_collection.py` always materializes the full vector set as an in-memory numpy array, and `on_disk` is accepted by the API for schema compatibility but never read by local mode's storage engine. Root cause is architectural (local mode itself), not a config issue - see Known limits. Left in place anyway since it's the correct config for a real Qdrant server, if the ingest architecture ever moves off local mode.
 - **v0.4.4** - Embedding cache (`--cache-path`) rebacked by SQLite instead of a second Qdrant collection, after a Colab GPU ingest OOM'd near the end of the full corpus (confirmed 2026-07-24: Qdrant's own local-mode client warns it's unsuitable above ~20K points; measured ~25x the peak memory of SQLite for the same 100K-vector dataset, independent of HNSW settings). Cache is now a single file (`./embed_cache.db` by default, was a directory).
 - **v0.4.3** - `ingest` gains a persistent, content-addressed embedding cache that survives across runs even though `--storage-dir` is still fully rebuilt each time - re-ingesting an updated corpus now skips re-embedding unchanged Acts' text. See "Delta ingest via the embedding cache".
@@ -47,7 +48,7 @@ The ingest command embeds sections using a local ONNX model (~270 MB, downloaded
 - [ ] The lex-au corpus must be built first (see step 1 below); confirm `corpus/xml/*.xml` files are present
 - [ ] Set `LEXAU_SEARCH_STORAGE` to the absolute path of `qdrant_storage/` before wiring up the MCP server
 
-**First-run model download:** On first ingest, FastEmbed downloads `BAAI/bge-base-en-v1.5` and `Qdrant/bm25` to `~/.cache/fastembed/` (~135 MB total). Subsequent runs skip the download.
+**First-run model download:** On first ingest, FastEmbed downloads `snowflake/snowflake-arctic-embed-l` and `Qdrant/bm25` to `~/.cache/fastembed/` (~1.1 GB total). Subsequent runs skip the download.
 
 **Resuming after interruption:** Qdrant local storage is not transactional at the ingest level - a partial run leaves a corrupt collection. Delete `qdrant_storage/` and re-run `ingest` from scratch. This does **not** apply to `--cache-path` (default `./embed_cache.db`) - leave that in place, see "Delta ingest" below.
 

@@ -280,3 +280,13 @@ def test_indexer_no_cache_counters_stay_zero(privacy_chunks):
     idx.upsert_chunks(privacy_chunks)
     assert idx.cache_hits == 0
     assert idx.cache_misses == 0
+
+
+def test_dense_model_is_snowflake_arctic_embed_l():
+    from lexausearch import indexer
+    assert indexer.DENSE_MODEL == "snowflake/snowflake-arctic-embed-l"
+
+
+def test_dense_vector_size_matches_arctic_embed_l():
+    from lexausearch import cache
+    assert cache.DENSE_VECTOR_SIZE == 1024

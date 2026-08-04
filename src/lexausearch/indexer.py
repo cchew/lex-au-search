@@ -19,7 +19,7 @@ from lexausearch.models import ActRecord, Chunk
 if TYPE_CHECKING:
     from lexausearch.cache import EmbedCache
 
-DENSE_MODEL = "BAAI/bge-base-en-v1.5"
+DENSE_MODEL = "snowflake/snowflake-arctic-embed-l"
 SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"

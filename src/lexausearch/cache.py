@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-DENSE_VECTOR_SIZE = 768  # BAAI/bge-base-en-v1.5 output dimension
+DENSE_VECTOR_SIZE = 1024  # snowflake/snowflake-arctic-embed-l output dimension
 _UUID5_NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # URL namespace
 
 
@@ -14,7 +14,7 @@ class EmbedCache:
     """Persistent UUID5-keyed dense embedding cache backed by SQLite.
 
     Key: UUID5(URL_NS, text) — deterministic, content-addressed.
-    Value: float32 dense vector (768-dim for BAAI/bge-base-en-v1.5), stored as a BLOB.
+    Value: float32 dense vector (1024-dim for snowflake/snowflake-arctic-embed-l), stored as a BLOB.
 
     Backed by SQLite rather than a Qdrant collection: this cache is only ever
     read by exact-id lookup, never vector similarity search, and Qdrant's

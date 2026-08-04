@@ -9,7 +9,7 @@ from qdrant_client import QdrantClient
 
 from lexausearch.cache import EmbedCache
 from lexausearch.chunker import chunk_corpus, load_corpus_act_names, missing_acts
-from lexausearch.indexer import Indexer
+from lexausearch.indexer import DENSE_MODEL, Indexer
 from lexausearch.models import ActRecord
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
@@ -98,7 +98,7 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
     click.echo(f"Embedding cache: {cache_path} (persists across runs)")
     client = QdrantClient(path=str(storage_dir))
-    indexer = Indexer(client, cache=EmbedCache(cache_path))
+    indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
     act_names = list(act_chunks.keys())
     for i, act_name in enumerate(act_names, 1):
         act_chunk_list = act_chunks[act_name]

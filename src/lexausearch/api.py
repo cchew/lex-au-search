@@ -15,7 +15,7 @@ def _eid_sort_key(eid: str) -> tuple[int, ...]:
 
 
 def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
-    app = FastAPI(title="lex-au-search", version="0.4.4")
+    app = FastAPI(title="lex-au-search", version="0.4.6")
 
     @app.get(
         "/search",
