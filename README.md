@@ -36,7 +36,7 @@ pip install -e ".[dev]"
 
 ## Before full ingest
 
-The ingest command embeds sections using a local ONNX model (~270 MB, downloaded once to `~/.cache/fastembed/`). CPU-only ingest does not scale well past a few hundred Acts - budget on the order of a day or more for the full corpus (2,900+ Acts, 500,000+ chunks) on a laptop CPU, and significant RAM while running.
+The ingest command embeds sections using a local ONNX model (~1.1 GB, downloaded once to `~/.cache/fastembed/`). CPU-only ingest does not scale well past a few hundred Acts - budget on the order of a day or more for the full corpus (2,900+ Acts, 500,000+ chunks) on a laptop CPU, and significant RAM while running.
 
 **GPU acceleration:** `ingest` auto-detects an available CUDA GPU and uses it transparently - no flag, no separate command. To enable it, install the `gpu` extra (`pip install -e ".[gpu]"`) on a CUDA-capable machine, which pulls in `onnxruntime-gpu` instead of the CPU-only `onnxruntime`; the two packages conflict, so uninstall the CPU one first (`pip uninstall onnxruntime && pip install -e ".[gpu]"`). Without a CUDA GPU (or without the `gpu` extra), `ingest` runs on CPU exactly as before - nothing to configure. This makes it practical to run the same `lex-au-search ingest` command on a free Colab GPU runtime, a rented GPU cloud instance, or a plain laptop, whichever you have.
 

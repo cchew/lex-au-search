@@ -154,19 +154,19 @@ def test_embed_cache_cold_miss():
 
 def test_embed_cache_put_get_roundtrip():
     cache = EmbedCache(":memory:")
-    vector = [0.1] * 768
+    vector = [0.1] * 1024
     cache.put("hello world", vector)
     result = cache.get("hello world")
     assert result is not None
-    assert len(result) == 768
+    assert len(result) == 1024
     for a, b in zip(vector, result):
         assert abs(a - b) < 1e-6
 
 
 def test_embed_cache_get_batch():
     cache = EmbedCache(":memory:")
-    cache.put("text one", [0.1] * 768)
-    cache.put("text two", [0.2] * 768)
+    cache.put("text one", [0.1] * 1024)
+    cache.put("text two", [0.2] * 1024)
     hits = cache.get_batch(["text one", "text two", "text three"])
     assert "text one" in hits
     assert "text two" in hits
@@ -175,7 +175,7 @@ def test_embed_cache_get_batch():
 
 def test_embed_cache_put_batch():
     cache = EmbedCache(":memory:")
-    cache.put_batch({"text one": [0.1] * 768, "text two": [0.2] * 768})
+    cache.put_batch({"text one": [0.1] * 1024, "text two": [0.2] * 1024})
     hits = cache.get_batch(["text one", "text two"])
     assert len(hits) == 2
 
@@ -191,7 +191,7 @@ def test_embed_cache_uuid5_deterministic():
 def test_embed_cache_persists_to_file(tmp_path):
     """Unlike Qdrant local mode, a real file path must survive a fresh connection."""
     db_path = tmp_path / "embed_cache.db"
-    EmbedCache(db_path).put("hello", [0.5] * 768)
+    EmbedCache(db_path).put("hello", [0.5] * 1024)
     reopened = EmbedCache(db_path)
     assert reopened.get("hello") is not None
 
