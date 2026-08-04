@@ -213,6 +213,29 @@ def shard_bounds(total_acts: int, shard_index: int, shard_size: int) -> tuple[in
     return (start, end)
 
 
+def chunk_corpus_for_acts(corpus_dir: Path, act_names: set[str]) -> list[Chunk]:
+    """Like chunk_corpus() but only parses/chunks Acts in act_names - bounds
+    the in-memory chunk list to one shard's worth instead of the whole
+    corpus. corpus_index for cross-Act ref resolution is still built from
+    the FULL index.json (not just act_names), so refs to Acts outside this
+    shard still resolve correctly."""
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    corpus_index = {
+        entry["name"]: entry.get("frbr_expression_uri", "")
+        for entry in index["acts"].values()
+        if "name" in entry
+    }
+    chunks: list[Chunk] = []
+    for entry in index["acts"].values():
+        if "name" not in entry or entry["name"] not in act_names:
+            continue
+        xml_path = corpus_dir / entry["xml_path"]
+        act_chunks = chunk_xml(xml_path, entry["name"], corpus_index)
+        chunks.extend(act_chunks)
+    return chunks
+
+
 def chunk_corpus(corpus_dir: Path) -> list[Chunk]:
     index_path = corpus_dir / "index.json"
     index = json.loads(index_path.read_text())

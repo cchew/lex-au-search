@@ -327,3 +327,99 @@ def test_load_corpus_act_entries_preserves_index_json_order(tmp_path):
     (corpus_dir / "index.json").write_text(json.dumps(index))
     entries = load_corpus_act_entries(corpus_dir)
     assert [e["name"] for e in entries] == ["Crimes Act 1914", "Privacy Act 1988"]
+
+
+def test_chunk_corpus_for_acts_only_returns_requested_acts(tmp_path):
+    from lexausearch.chunker import chunk_corpus_for_acts
+    from tests.conftest import PRIVACY_ACT_XML
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    (xml_dir / "privacy-act-1988.xml").write_bytes(PRIVACY_ACT_XML.encode())
+    (xml_dir / "crimes-act-1914.xml").write_bytes(PRIVACY_ACT_XML.encode())  # reuse body, name differs
+    index = {
+        "acts": {
+            "privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"},
+            "crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"},
+        }
+    }
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+
+    chunks = chunk_corpus_for_acts(corpus_dir, {"Privacy Act 1988"})
+    assert all(c.act_name == "Privacy Act 1988" for c in chunks)
+    assert len(chunks) == 2  # PRIVACY_ACT_XML has 2 sections
+
+
+def test_chunk_corpus_for_acts_empty_set_returns_no_chunks(tmp_path):
+    from lexausearch.chunker import chunk_corpus_for_acts
+    from tests.conftest import PRIVACY_ACT_XML
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    (xml_dir / "privacy-act-1988.xml").write_bytes(PRIVACY_ACT_XML.encode())
+    index = {"acts": {"privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"}}}
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+
+    assert chunk_corpus_for_acts(corpus_dir, set()) == []
+
+
+def test_chunk_corpus_for_acts_resolves_cross_act_refs_outside_shard(tmp_path):
+    """A shard's Act can cite an Act NOT in the shard - the ref must still
+    resolve, because corpus_index is built from the full index.json, not
+    just the shard's act_names. This is the whole point of building
+    corpus_index before filtering, not after."""
+    from lexausearch.chunker import chunk_corpus_for_acts
+    AKN_NS = "http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
+    citing_xml = f"""<?xml version='1.0' encoding='UTF-8'?>
+<akomaNtoso xmlns="{AKN_NS}">
+  <act name="act">
+    <meta>
+      <identification source="#lex-au">
+        <FRBRWork><FRBRthis value="/akn/au/act/1988/119/!main"/>
+          <FRBRuri value="/akn/au/act/1988/119"/><FRBRdate date="1988" name="Generation"/>
+          <FRBRauthor href="#parliament"/>
+        </FRBRWork>
+        <FRBRExpression><FRBRthis value="/akn/au/act/1988/119/eng@2026-01-01/!main"/>
+          <FRBRuri value="/akn/au/act/1988/119/eng@2026-01-01"/>
+          <FRBRdate date="2026-01-01" name="Generation"/><FRBRauthor href="#parliament"/>
+          <FRBRlanguage language="eng"/>
+        </FRBRExpression>
+        <FRBRManifestation><FRBRthis value="/akn/au/act/1988/119/eng@2026-01-01/!main.akn"/>
+          <FRBRuri value="/akn/au/act/1988/119/eng@2026-01-01/!main.akn"/>
+          <FRBRdate date="2026-06-19" name="Generation"/><FRBRauthor href="#lex-au"/>
+        </FRBRManifestation>
+      </identification>
+    </meta>
+    <body>
+      <section eId="sec-6">
+        <num>6</num>
+        <heading>Notification</heading>
+        <content><p>See also the Crimes Act 1914 for related offences.</p></content>
+      </section>
+    </body>
+  </act>
+</akomaNtoso>"""
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    (xml_dir / "privacy-act-1988.xml").write_bytes(citing_xml.encode())
+    (xml_dir / "crimes-act-1914.xml").write_bytes(citing_xml.encode())  # content unused, just needs to exist
+    index = {
+        "acts": {
+            "privacy-act-1988": {
+                "name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml",
+                "frbr_expression_uri": "/akn/au/act/1988/119/eng@2026-01-01",
+            },
+            "crimes-act-1914": {
+                "name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml",
+                "frbr_expression_uri": "/akn/au/act/1914/6/eng@2026-01-01",
+            },
+        }
+    }
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+
+    # Shard contains ONLY Privacy Act 1988 - Crimes Act 1914 is in a different shard
+    chunks = chunk_corpus_for_acts(corpus_dir, {"Privacy Act 1988"})
+    assert len(chunks) == 1
+    assert "/akn/au/act/1914/6/eng@2026-01-01" in chunks[0].refs
+    assert "unresolved:Crimes Act 1914" not in chunks[0].refs
