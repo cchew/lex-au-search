@@ -75,6 +75,13 @@ def run_shard(index: int, shard_size: int, shards_dir: Path, gpu: str) -> bool:
             return False
         print(f"[shard {index}] done -> {zip_path}", file=sys.stderr)
         return True
+    except Exception as e:
+        # A transient colab_driver failure (e.g. an exec call timing out on
+        # real backend latency, see reference-google-colab-cli-kernelclient-bug
+        # memory) must fail only this shard, not crash the whole multi-shard
+        # run - subsequent shards, and a later retry of this one, still work.
+        print(f"[shard {index}] unexpected error: {e}", file=sys.stderr)
+        return False
     finally:
         cd.stop_session(name)
 

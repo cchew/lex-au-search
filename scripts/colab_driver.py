@@ -74,7 +74,10 @@ def create_session(name: str, gpu: str = "T4") -> dict:
 
 
 def verify_session(name: str) -> bool:
-    result = _colab("exec", "-s", name, timeout=60, input_str=_CUDA_CHECK)
+    # 90s not 60s: a real free-tier T4 smoke test (2026-08-04) saw first
+    # post-create exec take 21-60s+ depending on backend kernel-attach
+    # latency - 60s intermittently timed out, so pad with real headroom.
+    result = _colab("exec", "-s", name, timeout=90, input_str=_CUDA_CHECK)
     return _parse_verify_output(result.returncode, result.stdout)
 
 
@@ -96,7 +99,7 @@ def run_background(
         "threading.Thread(target=_wait, daemon=False).start()\n"
         "print('PID', p.pid)\n"
     )
-    result = _colab("exec", "-s", name, timeout=30, input_str=wrapper)
+    result = _colab("exec", "-s", name, timeout=60, input_str=wrapper)
     if result.returncode != 0:
         raise RuntimeError(f"run_background failed to launch on {name}: {result.stderr}")
     return _parse_pid_output(result.stdout)
@@ -110,7 +113,13 @@ def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> st
         f"code = open({exit_code_path!r}).read().strip() if done else ''\n"
         "print('ALIVE' if alive else 'DEAD', 'DONE' if done else 'PENDING', code)\n"
     )
-    result = _colab("exec", "-s", name, timeout=30, input_str=check)
+    try:
+        result = _colab("exec", "-s", name, timeout=60, input_str=check)
+    except subprocess.TimeoutExpired:
+        # A slow status check isn't evidence the remote job died - treat as
+        # still running and let the next poll retry, rather than discarding
+        # real in-progress work over one transient exec-latency hiccup.
+        return "running"
     if result.returncode != 0:
         return "failed"
     return _parse_poll_output(result.stdout)
@@ -122,7 +131,7 @@ def tail_log(name: str, log_path: str = "job.log", n: int = 50) -> str:
         f"print(subprocess.run(['tail', '-n', '{n}', {log_path!r}], "
         "capture_output=True, text=True).stdout)\n"
     )
-    result = _colab("exec", "-s", name, timeout=30, input_str=code)
+    result = _colab("exec", "-s", name, timeout=60, input_str=code)
     return result.stdout
 
 
