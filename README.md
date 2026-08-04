@@ -193,7 +193,7 @@ Response:
 - No auth on HTTP API (local use only)
 - `get_act_sections` and `get_act_text` return full Act content - responses exceed LLM context limits for any non-trivial Act; use `search_legislation` for NL queries
 - Index covers 2,394 Acts from a 2026-07-16 Colab ingest, against lex-au's corpus at that time (2,942 Acts) - ~550-Act gap not yet diagnosed
-- Full re-ingest against lex-au's current corpus (3,078 Acts as of v0.7.5, 2026-07-22) OOM-kills on Colab free tier (12.7GB) at the same point every run (~2,920 of ~3,078 Acts processed). Root cause confirmed 2026-07-27: Qdrant's local/embedded mode always keeps the full vector set resident in RAM, with no working on-disk option. Next fix is a sharded ingest (batch Acts into separate local collections, merge after) - not yet built.
+- Full re-ingest against lex-au's current corpus (3,078 Acts as of v0.7.5, 2026-07-22) OOM-kills on Colab free tier (12.7GB) at the same point every run (~2,920 of ~3,078 Acts processed). Root cause confirmed 2026-07-27: Qdrant's local/embedded mode always keeps the full vector set resident in RAM, with no working on-disk option. Fix is `scripts/run_sharded_ingest.py` (see "Sharded ingest" above) - built and real-Colab-validated 2026-08-04, but the actual full 3,078-Act production run under it hasn't happened yet, so the index below is still the 2026-07-16 one.
 
 ## Under consideration
 
