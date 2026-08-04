@@ -7,12 +7,12 @@ from pathlib import Path
 import click
 from qdrant_client import QdrantClient
 
-from lexausearch.cache import EmbedCache
+from lexausearch.cache import EmbedCache, merge_cache_files
 from lexausearch.chunker import (
     chunk_corpus, chunk_corpus_for_acts, load_corpus_act_names,
     load_corpus_act_entries, shard_bounds, missing_acts,
 )
-from lexausearch.indexer import DENSE_MODEL, Indexer
+from lexausearch.indexer import DENSE_MODEL, Indexer, merge_shard_clients
 from lexausearch.models import ActRecord, Chunk
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
@@ -186,6 +186,46 @@ def ingest_shard(
     )
     chunks = chunk_corpus_for_acts(corpus_dir, shard_act_names)
     _run_ingest(chunks, storage_dir, cache_path, shard_act_names)
+
+
+@cli.command(name="merge-shards")
+@click.option(
+    "--shard-storage-dirs", required=True,
+    help="Comma-separated list of shard-local Qdrant storage directories to merge",
+)
+@click.option(
+    "--shard-cache-paths", required=True,
+    help="Comma-separated list of shard-local embed_cache.db files to merge",
+)
+@click.option(
+    "--output-storage-dir", required=True, type=click.Path(path_type=Path),
+    help="Path for the final merged Qdrant storage directory",
+)
+@click.option(
+    "--output-cache-path", required=True, type=click.Path(path_type=Path),
+    help="Path for the final merged embedding cache",
+)
+def merge_shards_cmd(
+    shard_storage_dirs: str, shard_cache_paths: str, output_storage_dir: Path, output_cache_path: Path
+) -> None:
+    """Merge all completed shards' local storage + cache into one final
+    qdrant_storage/ + embed_cache.db (same shape serve/mcp already expect).
+    Runs entirely on CPU - no GPU needed, this only copies existing points
+    and cached vectors, it never re-embeds."""
+    storage_dirs = [Path(p.strip()) for p in shard_storage_dirs.split(",")]
+    cache_paths = [Path(p.strip()) for p in shard_cache_paths.split(",")]
+
+    click.echo(f"Merging {len(storage_dirs)} shard(s) into {output_storage_dir} ...")
+    shard_clients = [QdrantClient(path=str(d)) for d in storage_dirs]
+    output_client = QdrantClient(path=str(output_storage_dir))
+    totals = merge_shard_clients(shard_clients, output_client)
+    click.echo(f"  {totals['sections']} chunks + {totals['acts']} Act records merged.")
+
+    click.echo(f"Merging {len(cache_paths)} shard cache(s) into {output_cache_path} ...")
+    rows = merge_cache_files(cache_paths, output_cache_path)
+    click.echo(f"  {rows} cache rows merged (deduplicated by content-addressed key).")
+
+    click.echo("Done.")
 
 
 @cli.command()

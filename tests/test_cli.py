@@ -139,3 +139,61 @@ def test_ingest_shard_out_of_range_index_is_a_no_op(tmp_path):
     ])
     assert result.exit_code == 0, result.output
     assert "empty" in result.output.lower()
+
+
+def test_merge_shards_combines_two_local_shard_storages(tmp_path):
+    # Build two tiny shard storages the way ingest-shard would.
+    shard0_corpus = tmp_path / "corpus0"
+    shard0_corpus.mkdir()
+    xml_dir0 = shard0_corpus / "xml"
+    xml_dir0.mkdir()
+    (xml_dir0 / "privacy-act-1988.xml").write_text(PRIVACY_ACT_XML)
+    (shard0_corpus / "index.json").write_text(json.dumps({
+        "acts": {"privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"}}
+    }))
+    shard0_storage = tmp_path / "shard0_storage"
+    shard0_cache = tmp_path / "shard0_cache.db"
+
+    shard1_corpus = tmp_path / "corpus1"
+    shard1_corpus.mkdir()
+    xml_dir1 = shard1_corpus / "xml"
+    xml_dir1.mkdir()
+    (xml_dir1 / "crimes-act-1914.xml").write_text(PRIVACY_ACT_XML)
+    (shard1_corpus / "index.json").write_text(json.dumps({
+        "acts": {"crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"}}
+    }))
+    shard1_storage = tmp_path / "shard1_storage"
+    shard1_cache = tmp_path / "shard1_cache.db"
+
+    runner = CliRunner()
+    for corpus_dir, storage_dir, cache_path in [
+        (shard0_corpus, shard0_storage, shard0_cache),
+        (shard1_corpus, shard1_storage, shard1_cache),
+    ]:
+        result = runner.invoke(cli, [
+            "ingest-shard",
+            "--corpus-dir", str(corpus_dir),
+            "--storage-dir", str(storage_dir),
+            "--cache-path", str(cache_path),
+            "--shard-index", "0",
+            "--shard-size", "10",
+        ])
+        assert result.exit_code == 0, result.output
+
+    output_storage = tmp_path / "merged_storage"
+    output_cache = tmp_path / "merged_cache.db"
+    result = runner.invoke(cli, [
+        "merge-shards",
+        "--shard-storage-dirs", f"{shard0_storage},{shard1_storage}",
+        "--shard-cache-paths", f"{shard0_cache},{shard1_cache}",
+        "--output-storage-dir", str(output_storage),
+        "--output-cache-path", str(output_cache),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from qdrant_client import QdrantClient
+    from lexausearch.indexer import COLLECTION_ACTS
+    merged_client = QdrantClient(path=str(output_storage))
+    points = merged_client.scroll(collection_name=COLLECTION_ACTS, limit=10, with_payload=True)[0]
+    act_names = {p.payload["act_name"] for p in points}
+    assert act_names == {"Privacy Act 1988", "Crimes Act 1914"}
