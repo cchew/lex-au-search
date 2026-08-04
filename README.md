@@ -77,6 +77,30 @@ Free-tier Colab sessions disconnect after ~12 hours of runtime or ~90 minutes id
 
 **Out-of-memory risk on the full corpus:** an early version of the embedding cache (v0.4.3) stored it as a second Qdrant collection, which OOM-killed a Colab run near the end of a full-corpus ingest (confirmed 2026-07-24) - Qdrant's local/embedded mode isn't built for datasets this size regardless of index settings. v0.4.4 replaced it with SQLite, which is ~25x lighter for this access pattern (pure id-keyed lookup, never vector search). If `ingest` still gets `Killed` with no traceback on a free-tier Colab instance, that's the kernel OOM killer - check `!free -h` beforehand and consider a higher-RAM Colab tier.
 
+### Sharded ingest (for large corpus growth)
+
+A single-run Colab ingest holds the whole corpus's chunks in memory and
+writes to one long-lived local Qdrant index - both scale badly past a few
+thousand Acts (see `docs/superpowers/specs/2026-07-27-colab-sharded-ingest-design.md`
+in the EA wrapper repo for the full writeup). For a large re-ingest, shard
+by Act count instead, each shard on its own fresh Colab VM:
+
+```bash
+python3 scripts/run_sharded_ingest.py --total-acts <N> --shard-size 300
+```
+
+Resumable - safe to re-run if it's interrupted or a shard fails; completed
+shards are skipped. Once all shards are downloaded to `./shards/`, unzip
+each and merge:
+
+```bash
+lex-au-search merge-shards \
+    --shard-storage-dirs shards/shard_000/shard_storage,shards/shard_001/shard_storage,... \
+    --shard-cache-paths shards/shard_000/shard_cache.db,shards/shard_001/shard_cache.db,... \
+    --output-storage-dir ./qdrant_storage \
+    --output-cache-path ./embed_cache.db
+```
+
 ### Delta ingest via the embedding cache
 
 `ingest` always re-chunks and re-upserts every Act in `--corpus-dir` into `--storage-dir` - there's no "only process changed Acts" flag, and `--storage-dir` should still be deleted before every run per the resuming-after-interruption note above. What's incremental is the *embedding* step: `--cache-path` (default `./embed_cache.db`) is a separate, persistent SQLite file, keyed by `UUID5(chunk_text)` - a content hash of the exact text being embedded. It is never deleted by `ingest` or `colab_ingest.sh`. Re-running `ingest` against a corpus where most Acts are unchanged produces identical chunk text for those Acts, which hits the cache and skips the (expensive) embedding call entirely - chunking and upserting still happen for every Act, but that's cheap. `ingest`'s final output line reports hit/miss counts so you can see the delta at a glance.
