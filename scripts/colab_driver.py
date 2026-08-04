@@ -28,9 +28,12 @@ import subprocess
 
 _ENV = {**os.environ, "OAUTHLIB_RELAX_TOKEN_SCOPE": "1"}
 _CUDA_CHECK = (
-    "import onnxruntime\n"
-    "providers = onnxruntime.get_available_providers()\n"
-    "assert 'CUDAExecutionProvider' in providers, providers\n"
+    # Checks GPU hardware attachment only, via torch - preinstalled on
+    # stock Colab images (confirmed 2026-08-04). onnxruntime is NOT
+    # preinstalled; the real onnxruntime-CUDA compatibility check happens
+    # later in colab_ingest_shard.sh, after it installs onnxruntime-gpu.
+    "import torch\n"
+    "assert torch.cuda.is_available(), 'no CUDA device attached'\n"
     "print('CUDA_VERIFY_OK')\n"
 )
 
@@ -124,6 +127,14 @@ def tail_log(name: str, log_path: str = "job.log", n: int = 50) -> str:
 
 
 def download(name: str, remote_path: str, local_path: str) -> bool:
+    """colab download resolves remote_path literally, not relative to the
+    exec kernel's cwd (confirmed /content on a stock Colab image, 2026-08-04)
+    - a relative path like 'job.log' fails with "File or directory not
+    found" even though it exists at /content/job.log. Anchor relative paths
+    to /content so callers can keep passing paths relative to where
+    run_background's remote commands actually execute."""
+    if not remote_path.startswith("/"):
+        remote_path = f"/content/{remote_path}"
     result = _colab("download", "-s", name, remote_path, local_path, timeout=600)
     return result.returncode == 0
 
