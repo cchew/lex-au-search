@@ -209,6 +209,45 @@ class Indexer:
         )
 
 
+def fetch_all_act_hashes(client: QdrantClient) -> dict[str, str]:
+    """Full scroll of COLLECTION_ACTS, returning {act_name: content_hash}
+    for every currently-indexed Act. Missing/legacy records (indexed before
+    this field existed) contribute "" for that Act, not a KeyError."""
+    if not client.collection_exists(COLLECTION_ACTS):
+        return {}
+    hashes: dict[str, str] = {}
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION_ACTS,
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for p in points:
+            act_name = p.payload.get("act_name")
+            if act_name:
+                hashes[act_name] = p.payload.get("content_hash", "")
+        if offset is None:
+            break
+    return hashes
+
+
+def delete_act(client: QdrantClient, act_name: str) -> None:
+    """Delete every point belonging to act_name from both collections
+    (legislation_section, legislation), by the existing act_name payload
+    index (already created on both collections by _create_payload_indexes).
+    Safe to call even if the Act was never indexed, or if a collection
+    doesn't exist yet -- both are no-ops, not errors."""
+    act_filter = qmodels.Filter(
+        must=[qmodels.FieldCondition(key="act_name", match=qmodels.MatchValue(value=act_name))]
+    )
+    for collection in (COLLECTION_SECTIONS, COLLECTION_ACTS):
+        if client.collection_exists(collection):
+            client.delete(collection_name=collection, points_selector=act_filter, wait=True)
+
+
 def merge_shard_clients(
     shard_clients: list[QdrantClient], output_client: QdrantClient, batch_size: int = 500
 ) -> dict[str, int]:

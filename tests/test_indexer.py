@@ -82,6 +82,76 @@ def test_upsert_acts_idempotent():
     idx.upsert_acts([record])  # second call must not raise
 
 
+def test_fetch_all_act_hashes_empty_collection_returns_empty_dict():
+    from lexausearch.indexer import fetch_all_act_hashes
+    client = QdrantClient(":memory:")
+    assert fetch_all_act_hashes(client) == {}
+
+
+def test_fetch_all_act_hashes_returns_stored_hash():
+    from lexausearch.indexer import fetch_all_act_hashes
+    client = QdrantClient(":memory:")
+    idx = Indexer(client)
+    record = _act_record()
+    record.content_hash = "abc123"
+    idx.upsert_acts([record])
+
+    hashes = fetch_all_act_hashes(client)
+    assert hashes == {"Privacy Act 1988": "abc123"}
+
+
+def test_fetch_all_act_hashes_defaults_empty_when_not_set():
+    from lexausearch.indexer import fetch_all_act_hashes
+    client = QdrantClient(":memory:")
+    idx = Indexer(client)
+    idx.upsert_acts([_act_record()])  # content_hash defaults to ""
+
+    hashes = fetch_all_act_hashes(client)
+    assert hashes == {"Privacy Act 1988": ""}
+
+
+def test_delete_act_removes_only_target_act_points():
+    from lexausearch.indexer import delete_act
+    client = QdrantClient(":memory:")
+    idx = Indexer(client)
+    idx.upsert_chunks([_chunk(act_name="Privacy Act 1988")])
+    idx.upsert_chunks([_chunk(act_name="Crimes Act 1914", eid="sec-1")])
+    idx.upsert_acts([_act_record()])
+    other_record = _act_record()
+    other_record.act_name = "Crimes Act 1914"
+    idx.upsert_acts([other_record])
+
+    delete_act(client, "Privacy Act 1988")
+
+    remaining_sections = client.scroll(
+        collection_name=COLLECTION_SECTIONS, limit=10, with_payload=True
+    )[0]
+    remaining_acts = client.scroll(
+        collection_name=COLLECTION_ACTS, limit=10, with_payload=True
+    )[0]
+    assert {p.payload["act_name"] for p in remaining_sections} == {"Crimes Act 1914"}
+    assert {p.payload["act_name"] for p in remaining_acts} == {"Crimes Act 1914"}
+
+
+def test_delete_act_noop_when_act_never_indexed():
+    from lexausearch.indexer import delete_act
+    client = QdrantClient(":memory:")
+    idx = Indexer(client)
+    idx.upsert_chunks([_chunk()])
+    idx.upsert_acts([_act_record()])
+
+    delete_act(client, "Some Other Act 1999")  # must not raise
+
+    remaining = client.scroll(collection_name=COLLECTION_SECTIONS, limit=10, with_payload=True)[0]
+    assert len(remaining) == 1
+
+
+def test_delete_act_noop_when_collection_does_not_exist():
+    from lexausearch.indexer import delete_act
+    client = QdrantClient(":memory:")
+    delete_act(client, "Privacy Act 1988")  # must not raise, no collections exist at all
+
+
 def test_configure_client_idempotent():
     client = QdrantClient(":memory:")
     configure_client(client)
