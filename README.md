@@ -45,7 +45,7 @@ The ingest command embeds sections using a local ONNX model (~1.1 GB, downloaded
 
 - [ ] Close other heavy apps (browser tabs, VS Code, etc.) to free RAM - macOS will page-out if memory is tight
 - [ ] Run ingest in a Terminal window, not inside Claude Code - the sandbox has a 10-minute process limit
-- [ ] `qdrant_storage/` must not already exist from a partial run - if it does, delete it and re-ingest from scratch
+- [ ] For `ingest`/`ingest-shard`: `qdrant_storage/` must not already exist from a partial run - if it does, delete it and re-ingest from scratch. (`ingest-delta` has the opposite contract - see "Delta ingest via Act-level content hash" below.)
 - [ ] The lex-au corpus must be built first (see step 1 below); confirm `corpus/xml/*.xml` files are present
 - [ ] Set `LEXAU_SEARCH_STORAGE` to the absolute path of `qdrant_storage/` before wiring up the MCP server
 
@@ -107,6 +107,18 @@ lex-au-search merge-shards \
 `ingest` always re-chunks and re-upserts every Act in `--corpus-dir` into `--storage-dir` - there's no "only process changed Acts" flag, and `--storage-dir` should still be deleted before every run per the resuming-after-interruption note above. What's incremental is the *embedding* step: `--cache-path` (default `./embed_cache.db`) is a separate, persistent SQLite file, keyed by `UUID5(chunk_text)` - a content hash of the exact text being embedded. It is never deleted by `ingest` or `colab_ingest.sh`. Re-running `ingest` against a corpus where most Acts are unchanged produces identical chunk text for those Acts, which hits the cache and skips the (expensive) embedding call entirely - chunking and upserting still happen for every Act, but that's cheap. `ingest`'s final output line reports hit/miss counts so you can see the delta at a glance.
 
 This means the practical pattern for re-ingesting after a small corpus update is: keep `embed_cache.db` from your last run (don't delete it, unlike `qdrant_storage/`), point `--cache-path` at it, and re-run `ingest` against the current corpus. On a persistent machine this needs no extra steps - the cache just accumulates on disk across runs. Moving the cache to a new machine (e.g. bootstrapping a laptop from a one-off Colab GPU run) just needs `embed_cache.db` copied over once, same as `qdrant_storage/`.
+
+### Delta ingest via Act-level content hash
+
+The embedding cache above skips re-*embedding* unchanged text, but `ingest`/`ingest-shard` still chunk and upsert every Act in the corpus, every run, and always start from an empty `--storage-dir`. For a small weekly catch-up (a handful of Acts changed, not the whole corpus), that's unnecessary work.
+
+`ingest-delta --corpus-dir <path> --storage-dir <path>` re-indexes only the Acts whose content actually changed since the last ingest into that `--storage-dir`, by comparing a SHA-256 hash of each Act's current corpus XML against the hash stored the last time it was indexed. Unlike `ingest`, **`--storage-dir` must already exist and hold a prior ingest** - `ingest-delta` never deletes it, and errors clearly if it finds no indexed Acts there.
+
+```bash
+lex-au-search ingest-delta --corpus-dir ../lex-au/repo/corpus/ --storage-dir ./qdrant_storage
+```
+
+Changed and new Acts are re-chunked, re-embedded (through the same `--cache-path` embedding cache), and upserted one Act at a time - each Act's old points are deleted first, since points aren't otherwise content-addressed and a re-upsert without deleting first would leave stale duplicates. Unchanged Acts are skipped entirely: no chunking, no embedding, no Qdrant write. The very first `ingest-delta` run against a `--storage-dir` built before this feature existed will treat every Act as changed (no baseline hash to compare against) - that's expected, one-time bootstrap behaviour, not a bug.
 
 ---
 
