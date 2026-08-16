@@ -76,6 +76,125 @@ def test_ingest_writes_content_hash_to_act_record(tmp_path):
     assert any(p.payload.get("content_hash") == expected_hash for p in points)
 
 
+def test_ingest_delta_reindexes_only_changed_act(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_two_act_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from qdrant_client import QdrantClient, models
+    from lexausearch.indexer import COLLECTION_SECTIONS
+
+    def _section_ids_for(act_name):
+        client = QdrantClient(path=str(storage_dir))
+        points = client.scroll(
+            collection_name=COLLECTION_SECTIONS, limit=100, with_payload=True,
+            scroll_filter=models.Filter(must=[
+                models.FieldCondition(key="act_name", match=models.MatchValue(value=act_name))
+            ]),
+        )[0]
+        return {p.id for p in points}
+
+    crimes_ids_before = _section_ids_for("Crimes Act 1914")
+    privacy_ids_before = _section_ids_for("Privacy Act 1988")
+    assert crimes_ids_before and privacy_ids_before  # sanity: both actually indexed
+
+    # Mutate only Privacy Act's XML -- changes its hash. Crimes Act is untouched.
+    xml_path = corpus_dir / "xml" / "privacy-act-1988.xml"
+    xml_path.write_text(xml_path.read_text() + "\n<!-- amended -->")
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 Act(s) changed or new, 1 unchanged" in result.output
+
+    crimes_ids_after = _section_ids_for("Crimes Act 1914")
+    privacy_ids_after = _section_ids_for("Privacy Act 1988")
+
+    # Untouched Act: identical point IDs -- genuinely skipped, not re-upserted.
+    assert crimes_ids_after == crimes_ids_before
+    # Changed Act: old points are gone, replaced by new ones (delete_act ran).
+    assert privacy_ids_before.isdisjoint(privacy_ids_after)
+    assert privacy_ids_after  # new points do exist
+
+
+def test_ingest_delta_nothing_changed_is_a_noop(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+    runner = CliRunner()
+    runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Nothing to do" in result.output
+
+
+def test_ingest_delta_picks_up_a_brand_new_act(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+    runner = CliRunner()
+    runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+
+    # Add a second Act to the corpus that was never ingested.
+    (corpus_dir / "xml" / "crimes-act-1914.xml").write_text(PRIVACY_ACT_XML)
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    index["acts"]["crimes-act-1914"] = {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"}
+    index_path.write_text(json.dumps(index))
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 Act(s) changed or new, 1 unchanged" in result.output
+
+    from qdrant_client import QdrantClient
+    from lexausearch.indexer import COLLECTION_ACTS
+    client = QdrantClient(path=str(storage_dir))
+    points = client.scroll(collection_name=COLLECTION_ACTS, limit=10, with_payload=True)[0]
+    assert {p.payload["act_name"] for p in points} == {"Privacy Act 1988", "Crimes Act 1914"}
+
+
+def test_ingest_delta_errors_when_storage_dir_not_yet_ingested(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_corpus(corpus_dir)
+    storage_dir = tmp_path / "never_ingested"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir), "--storage-dir", str(storage_dir),
+    ])
+    assert result.exit_code != 0
+    assert "ingest" in result.output.lower()
+
+
 def _write_two_act_corpus(corpus_dir):
     xml_dir = corpus_dir / "xml"
     xml_dir.mkdir()

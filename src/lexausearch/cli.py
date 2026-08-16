@@ -12,7 +12,7 @@ from lexausearch.chunker import (
     chunk_corpus, chunk_corpus_for_acts, load_corpus_act_names,
     load_corpus_act_entries, shard_bounds, missing_acts, compute_act_content_hashes,
 )
-from lexausearch.indexer import DENSE_MODEL, Indexer, merge_shard_clients
+from lexausearch.indexer import DENSE_MODEL, Indexer, merge_shard_clients, fetch_all_act_hashes, delete_act, COLLECTION_ACTS
 from lexausearch.models import ActRecord, Chunk
 from lexausearch.searcher import Searcher
 from lexausearch.api import create_app
@@ -233,6 +233,71 @@ def merge_shards_cmd(
     click.echo(f"  {rows} cache rows merged (deduplicated by content-addressed key).")
 
     click.echo("Done.")
+
+
+@cli.command(name="ingest-delta")
+@click.option(
+    "--corpus-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Path to lex-au corpus directory (contains index.json and xml/)",
+)
+@click.option(
+    "--storage-dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to an EXISTING Qdrant local storage directory. Unlike `ingest`, "
+         "this is never deleted -- it must already hold a prior `ingest`/"
+         "`ingest-shard` (+ `merge-shards`) run.",
+)
+@click.option(
+    "--cache-path",
+    default="./embed_cache.db",
+    type=click.Path(path_type=Path),
+    show_default=True,
+    help="Path to a persistent SQLite embedding cache file (same semantics as `ingest`).",
+)
+def ingest_delta(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
+    """Re-index only Acts whose content hash changed since the last ingest."""
+    client = QdrantClient(path=str(storage_dir))
+    if not client.collection_exists(COLLECTION_ACTS):
+        raise click.ClickException(
+            f"{storage_dir} has no indexed Acts yet -- run `ingest` (or the "
+            f"sharded pipeline) first before using ingest-delta."
+        )
+
+    click.echo(f"Hashing corpus at {corpus_dir} ...")
+    current = compute_act_content_hashes(corpus_dir)
+    click.echo(f"Reading indexed Act hashes from {storage_dir} ...")
+    indexed = fetch_all_act_hashes(client)
+
+    changed_or_new = sorted(name for name, h in current.items() if indexed.get(name) != h)
+    unchanged_count = len(current) - len(changed_or_new)
+    click.echo(
+        f"{len(changed_or_new)} Act(s) changed or new, {unchanged_count} unchanged (skipped)."
+    )
+    if not changed_or_new:
+        click.echo("Nothing to do.")
+        return
+
+    click.echo(f"Embedding cache: {cache_path} (persists across runs)")
+    indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
+
+    for i, act_name in enumerate(changed_or_new, 1):
+        click.echo(f"  [{i}/{len(changed_or_new)}] {act_name}")
+        delete_act(client, act_name)
+        act_chunk_list = chunk_corpus_for_acts(corpus_dir, {act_name})
+        if not act_chunk_list:
+            click.echo(f"    WARNING: {act_name} produced zero chunks, not re-indexed.")
+            continue
+        indexer.upsert_chunks(act_chunk_list)
+        indexer.upsert_acts([_act_record_from_chunks(act_name, act_chunk_list, current[act_name])])
+
+    click.echo(f"Done. {len(changed_or_new)} Act(s) re-indexed, {unchanged_count} unchanged.")
+    click.echo(
+        f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
+        f"({indexer.cache_hits} chunks skipped re-embedding)."
+    )
 
 
 @cli.command()
