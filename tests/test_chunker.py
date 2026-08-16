@@ -121,6 +121,61 @@ def test_load_corpus_act_names_reads_index_json(tmp_path):
     assert result == {"Privacy Act 1988", "Crimes Act 1914"}
 
 
+def test_compute_act_content_hashes_matches_manual_sha256(tmp_path):
+    import hashlib
+    from lexausearch.chunker import compute_act_content_hashes
+    from tests.conftest import PRIVACY_ACT_XML
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    xml_path = xml_dir / "privacy-act-1988.xml"
+    xml_bytes = PRIVACY_ACT_XML.encode()
+    xml_path.write_bytes(xml_bytes)
+    (corpus_dir / "index.json").write_text(json.dumps({
+        "acts": {"privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"}}
+    }))
+
+    hashes = compute_act_content_hashes(corpus_dir)
+    assert hashes == {"Privacy Act 1988": hashlib.sha256(xml_bytes).hexdigest()}
+
+
+def test_compute_act_content_hashes_filters_by_act_names(tmp_path):
+    from lexausearch.chunker import compute_act_content_hashes
+    from tests.conftest import PRIVACY_ACT_XML
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    (xml_dir / "privacy-act-1988.xml").write_bytes(PRIVACY_ACT_XML.encode())
+    (xml_dir / "crimes-act-1914.xml").write_bytes(PRIVACY_ACT_XML.encode())
+    (corpus_dir / "index.json").write_text(json.dumps({
+        "acts": {
+            "privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"},
+            "crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"},
+        }
+    }))
+
+    hashes = compute_act_content_hashes(corpus_dir, act_names={"Privacy Act 1988"})
+    assert set(hashes.keys()) == {"Privacy Act 1988"}
+
+
+def test_compute_act_content_hashes_changed_bytes_change_hash(tmp_path):
+    from lexausearch.chunker import compute_act_content_hashes
+    from tests.conftest import PRIVACY_ACT_XML
+    corpus_dir = tmp_path / "corpus"
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir(parents=True)
+    xml_path = xml_dir / "privacy-act-1988.xml"
+    xml_path.write_bytes(PRIVACY_ACT_XML.encode())
+    (corpus_dir / "index.json").write_text(json.dumps({
+        "acts": {"privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"}}
+    }))
+
+    before = compute_act_content_hashes(corpus_dir)["Privacy Act 1988"]
+    xml_path.write_bytes(PRIVACY_ACT_XML.encode() + b"\n<!-- amended -->")
+    after = compute_act_content_hashes(corpus_dir)["Privacy Act 1988"]
+    assert before != after
+
+
 def test_missing_acts_returns_sorted_names_not_indexed():
     from lexausearch.chunker import missing_acts
     corpus_names = {"Privacy Act 1988", "Crimes Act 1914", "Loan Act 1973"}

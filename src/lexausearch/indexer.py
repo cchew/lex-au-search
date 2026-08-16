@@ -201,6 +201,7 @@ class Indexer:
                     "as_at_date": r.as_at_date,
                     "section_count": r.section_count,
                     "schedule_clause_count": r.schedule_clause_count,
+                    "content_hash": r.content_hash,
                 }
                 for r in act_records
             ],

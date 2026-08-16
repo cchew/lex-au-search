@@ -23,6 +23,7 @@ class ActRecord:
     as_at_date: str           # compilation date from FRBRExpression FRBRdate (e.g. "2026-01-01")
     section_count: int
     schedule_clause_count: int
+    content_hash: str = ""    # SHA-256 hex digest of the Act's raw corpus XML file bytes
 
 
 @dataclass

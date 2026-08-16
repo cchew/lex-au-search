@@ -10,7 +10,7 @@ from qdrant_client import QdrantClient
 from lexausearch.cache import EmbedCache, merge_cache_files
 from lexausearch.chunker import (
     chunk_corpus, chunk_corpus_for_acts, load_corpus_act_names,
-    load_corpus_act_entries, shard_bounds, missing_acts,
+    load_corpus_act_entries, shard_bounds, missing_acts, compute_act_content_hashes,
 )
 from lexausearch.indexer import DENSE_MODEL, Indexer, merge_shard_clients
 from lexausearch.models import ActRecord, Chunk
@@ -40,8 +40,25 @@ def cli() -> None:
     pass
 
 
+def _act_record_from_chunks(act_name: str, chunks: list[Chunk], content_hash: str) -> ActRecord:
+    """Build one ActRecord from an Act's own chunk list. Shared by
+    _run_ingest (whole-batch path, called once per ingest run across all
+    Acts) and ingest-delta (Task 3, called once per changed Act)."""
+    frbr_uri = chunks[0].frbr_uri
+    return ActRecord(
+        act_name=act_name,
+        frbr_uri=frbr_uri,
+        year=_year_from_frbr_uri(frbr_uri),
+        as_at_date=_as_at_from_frbr_uri(frbr_uri),
+        section_count=sum(1 for c in chunks if c.provision_type == "section"),
+        schedule_clause_count=sum(1 for c in chunks if c.provision_type == "schedule_clause"),
+        content_hash=content_hash,
+    )
+
+
 def _run_ingest(
-    chunks: list[Chunk], storage_dir: Path, cache_path: Path, gap_check_names: set[str]
+    chunks: list[Chunk], storage_dir: Path, cache_path: Path, gap_check_names: set[str],
+    corpus_dir: Path,
 ) -> None:
     """Shared indexing + reporting logic for `ingest` and `ingest-shard`."""
     sections = [c for c in chunks if c.provision_type == "section"]
@@ -57,21 +74,11 @@ def _run_ingest(
     for c in chunks:
         act_chunks[c.act_name].append(c)
 
-    act_records: list[ActRecord] = []
-    for act_name, act_chunk_list in act_chunks.items():
-        frbr_uri = act_chunk_list[0].frbr_uri
-        year = _year_from_frbr_uri(frbr_uri)
-        as_at = _as_at_from_frbr_uri(frbr_uri)
-        section_count = sum(1 for c in act_chunk_list if c.provision_type == "section")
-        clause_count = sum(1 for c in act_chunk_list if c.provision_type == "schedule_clause")
-        act_records.append(ActRecord(
-            act_name=act_name,
-            frbr_uri=frbr_uri,
-            year=year,
-            as_at_date=as_at,
-            section_count=section_count,
-            schedule_clause_count=clause_count,
-        ))
+    act_hashes = compute_act_content_hashes(corpus_dir, set(act_chunks.keys()))
+    act_records = [
+        _act_record_from_chunks(act_name, act_chunk_list, act_hashes.get(act_name, ""))
+        for act_name, act_chunk_list in act_chunks.items()
+    ]
 
     click.echo(f"Indexing {len(chunks)} chunks into {storage_dir} ...")
     click.echo(f"Embedding cache: {cache_path} (persists across runs)")
@@ -136,7 +143,7 @@ def ingest(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     click.echo(f"Chunking corpus at {corpus_dir} ...")
     chunks = chunk_corpus(corpus_dir)
     corpus_act_names = load_corpus_act_names(corpus_dir)
-    _run_ingest(chunks, storage_dir, cache_path, corpus_act_names)
+    _run_ingest(chunks, storage_dir, cache_path, corpus_act_names, corpus_dir)
 
 
 @cli.command(name="ingest-shard")
@@ -185,7 +192,7 @@ def ingest_shard(
         f"({len(shard_act_names)} Acts) ..."
     )
     chunks = chunk_corpus_for_acts(corpus_dir, shard_act_names)
-    _run_ingest(chunks, storage_dir, cache_path, shard_act_names)
+    _run_ingest(chunks, storage_dir, cache_path, shard_act_names, corpus_dir)
 
 
 @cli.command(name="merge-shards")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -234,6 +235,27 @@ def chunk_corpus_for_acts(corpus_dir: Path, act_names: set[str]) -> list[Chunk]:
         act_chunks = chunk_xml(xml_path, entry["name"], corpus_index)
         chunks.extend(act_chunks)
     return chunks
+
+
+def compute_act_content_hashes(
+    corpus_dir: Path, act_names: set[str] | None = None
+) -> dict[str, str]:
+    """SHA-256 hex digest of each Act's raw XML file bytes, keyed by Act
+    name. act_names=None hashes every Act in the corpus; a set restricts to
+    just those (mirrors chunk_corpus_for_acts's filtering shape). Hashes the
+    raw file, not extracted chunk text, so both a legislative amendment and
+    a lex-au re-extraction-only fix (same comp_num, different parser output)
+    are detected uniformly."""
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    hashes: dict[str, str] = {}
+    for entry in index["acts"].values():
+        name = entry.get("name")
+        if not name or (act_names is not None and name not in act_names):
+            continue
+        xml_path = corpus_dir / entry["xml_path"]
+        hashes[name] = hashlib.sha256(xml_path.read_bytes()).hexdigest()
+    return hashes
 
 
 def chunk_corpus(corpus_dir: Path) -> list[Chunk]:

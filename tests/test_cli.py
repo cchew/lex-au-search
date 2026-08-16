@@ -51,6 +51,31 @@ def test_ingest_second_run_reports_cache_hits(tmp_path):
     assert "0 misses" in second.output
 
 
+def test_ingest_writes_content_hash_to_act_record(tmp_path):
+    import hashlib
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_corpus(corpus_dir)
+    storage_dir = tmp_path / "qdrant_storage"
+    cache_path = tmp_path / "embed_cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest",
+        "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir),
+        "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from qdrant_client import QdrantClient
+    from lexausearch.indexer import COLLECTION_ACTS
+    client = QdrantClient(path=str(storage_dir))
+    points = client.scroll(collection_name=COLLECTION_ACTS, limit=10, with_payload=True)[0]
+    expected_hash = hashlib.sha256(PRIVACY_ACT_XML.encode()).hexdigest()
+    assert any(p.payload.get("content_hash") == expected_hash for p in points)
+
+
 def _write_two_act_corpus(corpus_dir):
     xml_dir = corpus_dir / "xml"
     xml_dir.mkdir()

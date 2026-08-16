@@ -53,6 +53,27 @@ def test_act_record_fields():
     assert r.schedule_clause_count == 13
 
 
+def test_act_record_content_hash_defaults_empty():
+    r = ActRecord(
+        act_name="Privacy Act 1988",
+        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
+        year=1988, as_at_date="2026-01-01",
+        section_count=1, schedule_clause_count=0,
+    )
+    assert r.content_hash == ""
+
+
+def test_act_record_content_hash_stored():
+    r = ActRecord(
+        act_name="Privacy Act 1988",
+        frbr_uri="/akn/au/act/1988/119/eng@2026-01-01",
+        year=1988, as_at_date="2026-01-01",
+        section_count=1, schedule_clause_count=0,
+        content_hash="abc123",
+    )
+    assert r.content_hash == "abc123"
+
+
 def test_act_search_result_fields():
     r = ActRecord(
         act_name="Privacy Act 1988",
