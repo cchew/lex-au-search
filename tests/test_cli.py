@@ -195,6 +195,118 @@ def test_ingest_delta_errors_when_storage_dir_not_yet_ingested(tmp_path):
     assert "ingest" in result.output.lower()
 
 
+_ZERO_CHUNK_AKN_XML = """\
+<?xml version='1.0' encoding='UTF-8'?>
+<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+  <act name="act">
+    <meta>
+      <identification source="#lex-au">
+        <FRBRExpression>
+          <FRBRuri value="/akn/au/act/1988/119/eng@2026-01-01"/>
+        </FRBRExpression>
+      </identification>
+    </meta>
+    <body>
+    </body>
+  </act>
+</akomaNtoso>"""
+
+
+def _ids_for_act(storage_dir, collection, act_name):
+    from qdrant_client import QdrantClient, models
+    client = QdrantClient(path=str(storage_dir))
+    points = client.scroll(
+        collection_name=collection, limit=100, with_payload=True,
+        scroll_filter=models.Filter(must=[
+            models.FieldCondition(key="act_name", match=models.MatchValue(value=act_name))
+        ]),
+    )[0]
+    return {p.id for p in points}
+
+
+def test_ingest_delta_skips_zero_chunk_act_without_deleting_index_entry(tmp_path):
+    """A corpus regression that makes an Act stop producing chunks must not
+    delete that Act's existing index entry -- stale-but-present beats missing."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_two_act_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from lexausearch.indexer import COLLECTION_SECTIONS, COLLECTION_ACTS
+
+    section_ids_before = _ids_for_act(storage_dir, COLLECTION_SECTIONS, "Privacy Act 1988")
+    act_ids_before = _ids_for_act(storage_dir, COLLECTION_ACTS, "Privacy Act 1988")
+    assert section_ids_before and act_ids_before  # sanity: actually indexed
+
+    # Replace Privacy Act's XML with a valid-but-empty AKN doc: different
+    # content hash (so it's picked up as "changed"), but zero extractable
+    # chunks -- simulates a corpus/parser regression.
+    xml_path = corpus_dir / "xml" / "privacy-act-1988.xml"
+    xml_path.write_text(_ZERO_CHUNK_AKN_XML)
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code != 0, result.output
+    assert "zero chunks" in result.output.lower()
+    assert "privacy act 1988" in result.output.lower()
+
+    # Old points for the zero-chunk Act must still be present -- not deleted.
+    assert _ids_for_act(storage_dir, COLLECTION_SECTIONS, "Privacy Act 1988") == section_ids_before
+    assert _ids_for_act(storage_dir, COLLECTION_ACTS, "Privacy Act 1988") == act_ids_before
+
+
+def test_ingest_delta_isolates_per_act_failure(tmp_path):
+    """A malformed Act's XML must not abort the run for the rest of the batch."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_two_act_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    # Crimes Act's XML becomes malformed -- chunk_xml/etree.parse will raise.
+    (corpus_dir / "xml" / "crimes-act-1914.xml").write_text("<not><valid xml")
+    # Privacy Act gets a genuine (parseable) amendment -- should still succeed.
+    privacy_xml_path = corpus_dir / "xml" / "privacy-act-1988.xml"
+    privacy_xml_path.write_text(privacy_xml_path.read_text() + "\n<!-- amended -->")
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code != 0, result.output
+    assert "crimes act 1914" in result.output.lower()
+
+    from qdrant_client import QdrantClient
+    from lexausearch.indexer import COLLECTION_ACTS
+    client = QdrantClient(path=str(storage_dir))
+    points = client.scroll(collection_name=COLLECTION_ACTS, limit=10, with_payload=True)[0]
+    act_hashes = {p.payload["act_name"]: p.payload["content_hash"] for p in points}
+
+    # Both Acts remain indexed -- the failure isolated to Crimes Act, and
+    # Privacy Act's genuinely-changed content still made it through.
+    assert set(act_hashes) == {"Privacy Act 1988", "Crimes Act 1914"}
+    import hashlib
+    expected_privacy_hash = hashlib.sha256(privacy_xml_path.read_bytes()).hexdigest()
+    assert act_hashes["Privacy Act 1988"] == expected_privacy_hash
+
+
 def _write_two_act_corpus(corpus_dir):
     xml_dir = corpus_dir / "xml"
     xml_dir.mkdir()

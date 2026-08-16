@@ -259,45 +259,90 @@ def merge_shards_cmd(
 )
 def ingest_delta(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
     """Re-index only Acts whose content hash changed since the last ingest."""
-    client = QdrantClient(path=str(storage_dir))
-    if not client.collection_exists(COLLECTION_ACTS):
-        raise click.ClickException(
-            f"{storage_dir} has no indexed Acts yet -- run `ingest` (or the "
-            f"sharded pipeline) first before using ingest-delta."
+    try:
+        client = QdrantClient(path=str(storage_dir))
+    except RuntimeError as e:
+        if "already accessed by another instance" in str(e):
+            raise click.ClickException(
+                f"{storage_dir} is locked by another process (e.g. `serve` or "
+                f"`mcp` holding --storage-dir open). Stop that process first, "
+                f"then re-run ingest-delta."
+            )
+        raise
+    try:
+        if not client.collection_exists(COLLECTION_ACTS):
+            raise click.ClickException(
+                f"{storage_dir} has no indexed Acts yet -- run `ingest` (or the "
+                f"sharded pipeline) first before using ingest-delta."
+            )
+
+        click.echo(f"Hashing corpus at {corpus_dir} ...")
+        current = compute_act_content_hashes(corpus_dir)
+        click.echo(f"Reading indexed Act hashes from {storage_dir} ...")
+        indexed = fetch_all_act_hashes(client)
+
+        changed_or_new = sorted(name for name, h in current.items() if indexed.get(name) != h)
+        unchanged_count = len(current) - len(changed_or_new)
+        click.echo(
+            f"{len(changed_or_new)} Act(s) changed or new, {unchanged_count} unchanged (skipped)."
         )
+        if not changed_or_new:
+            click.echo("Nothing to do.")
+            return
 
-    click.echo(f"Hashing corpus at {corpus_dir} ...")
-    current = compute_act_content_hashes(corpus_dir)
-    click.echo(f"Reading indexed Act hashes from {storage_dir} ...")
-    indexed = fetch_all_act_hashes(client)
+        click.echo(f"Embedding cache: {cache_path} (persists across runs)")
+        indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
 
-    changed_or_new = sorted(name for name, h in current.items() if indexed.get(name) != h)
-    unchanged_count = len(current) - len(changed_or_new)
-    click.echo(
-        f"{len(changed_or_new)} Act(s) changed or new, {unchanged_count} unchanged (skipped)."
-    )
-    if not changed_or_new:
-        click.echo("Nothing to do.")
-        return
+        reindexed_count = 0
+        skipped: list[str] = []
+        failed: list[str] = []
 
-    click.echo(f"Embedding cache: {cache_path} (persists across runs)")
-    indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
+        for i, act_name in enumerate(changed_or_new, 1):
+            click.echo(f"  [{i}/{len(changed_or_new)}] {act_name}")
+            try:
+                # Chunk BEFORE deleting: a corpus regression that makes an Act
+                # produce zero chunks must not delete that Act's existing index
+                # entry with nothing to replace it -- stale-but-present beats
+                # missing. Only delete once we know we have chunks in hand.
+                act_chunk_list = chunk_corpus_for_acts(corpus_dir, {act_name})
+                if not act_chunk_list:
+                    click.echo(
+                        f"    WARNING: {act_name} produced zero chunks, not "
+                        f"re-indexed (existing index entry left in place)."
+                    )
+                    skipped.append(act_name)
+                    continue
+                delete_act(client, act_name)
+                indexer.upsert_chunks(act_chunk_list)
+                indexer.upsert_acts([_act_record_from_chunks(act_name, act_chunk_list, current[act_name])])
+                reindexed_count += 1
+            except Exception as e:
+                click.echo(f"    ERROR: {act_name} failed, leaving prior index entry in place: {e}")
+                failed.append(act_name)
+                continue
 
-    for i, act_name in enumerate(changed_or_new, 1):
-        click.echo(f"  [{i}/{len(changed_or_new)}] {act_name}")
-        delete_act(client, act_name)
-        act_chunk_list = chunk_corpus_for_acts(corpus_dir, {act_name})
-        if not act_chunk_list:
-            click.echo(f"    WARNING: {act_name} produced zero chunks, not re-indexed.")
-            continue
-        indexer.upsert_chunks(act_chunk_list)
-        indexer.upsert_acts([_act_record_from_chunks(act_name, act_chunk_list, current[act_name])])
-
-    click.echo(f"Done. {len(changed_or_new)} Act(s) re-indexed, {unchanged_count} unchanged.")
-    click.echo(
-        f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
-        f"({indexer.cache_hits} chunks skipped re-embedding)."
-    )
+        click.echo(
+            f"Done. {reindexed_count} Act(s) re-indexed, {unchanged_count} unchanged (skipped)."
+        )
+        click.echo(
+            f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
+            f"({indexer.cache_hits} chunks skipped re-embedding)."
+        )
+        if skipped:
+            click.echo(f"Skipped (zero chunks): {', '.join(skipped)}")
+        if failed:
+            click.echo(f"Failed: {', '.join(failed)}")
+        if skipped or failed:
+            raise click.ClickException(
+                f"{len(skipped)} Act(s) skipped and {len(failed)} Act(s) failed -- "
+                f"index is incomplete for these Acts (prior entries left in place)."
+            )
+    finally:
+        # Release the exclusive local-mode lock deterministically -- relying
+        # on GC to drop `client` is unreliable once an exception's traceback
+        # keeps this frame (and `client`) alive, e.g. via CliRunner's
+        # captured exc_info in tests, or any other caller holding the error.
+        client.close()
 
 
 @cli.command()
