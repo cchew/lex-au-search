@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 
 _ENV = {**os.environ, "OAUTHLIB_RELAX_TOKEN_SCOPE": "1"}
@@ -150,6 +151,45 @@ def download(name: str, remote_path: str, local_path: str) -> bool:
 
 def stop_session(name: str) -> None:
     _colab("stop", "-s", name, timeout=60)
+    _release_orphaned_assignments()
+
+
+def _release_orphaned_assignments() -> None:
+    """`colab stop -s NAME` looks the session up in a local registry
+    (~/.config/colab-cli/sessions.json) and silently no-ops - printing
+    "Session 'NAME' not found" - if that registry has desynced from the
+    backend, which happens when Colab disconnects a runtime mid-job (a real
+    risk on a multi-hour, mostly-unattended sharded run). When that
+    happens the GPU assignment stays held server-side, and every later
+    create_session() call fails with TooManyAssignmentsError (free tier
+    allows exactly one concurrent GPU assignment) - one disconnected shard
+    cascades into every remaining shard failing, not just the one that
+    disconnected (confirmed 2026-08-17: shard 0 disconnected mid-run,
+    shards 1-10 then all failed at create_session). Fall back to
+    unassigning by endpoint directly against the backend, bypassing the
+    local-name lookup that `colab stop` depends on. Best-effort: if the
+    `colab` executable or its interpreter can't be resolved, this is a
+    no-op rather than a hard failure.
+    """
+    colab_path = shutil.which("colab")
+    if colab_path is None:
+        return
+    with open(colab_path) as f:
+        shebang = f.readline().strip()
+    if not shebang.startswith("#!"):
+        return
+    interpreter = shebang[2:]
+    code = (
+        "from colab_cli.common import state\n"
+        "for a in state.client.list_assignments():\n"
+        "    state.client.unassign(a.endpoint)\n"
+    )
+    try:
+        subprocess.run(
+            [interpreter, "-c", code], capture_output=True, text=True, timeout=60, env=_ENV
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
 
 def main() -> None:
