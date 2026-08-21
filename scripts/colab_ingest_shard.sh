@@ -56,6 +56,20 @@ if xml_paths:
 "
 
 rm -rf shard_storage
+
+# Seeded by run_sharded_ingest.py's _pull_checkpoint from a prior attempt at
+# THIS shard that got killed mid-run (confirmed 2026-08-21: free-tier
+# sessions get pruned at ~60min regardless of RAM/GPU headroom or keep-alive
+# health) - already-embedded chunks land as cache hits below and skip
+# re-embedding entirely (see Indexer._upsert_chunks_with_cache). Lives at
+# /content/, not repo/, specifically so the `rm -rf repo` in
+# run_sharded_ingest.py's remote_cmd (which recreates this checkout fresh
+# every attempt) can't delete it out from under itself.
+if [ -f /content/shard_cache_seed.db ]; then
+    echo "Seeding shard_cache.db from a prior partial attempt's checkpoint ..."
+    cp /content/shard_cache_seed.db ./shard_cache.db
+fi
+
 lex-au-search ingest-shard \
     --corpus-dir corpus/ \
     --storage-dir ./shard_storage \

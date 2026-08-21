@@ -14,15 +14,23 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 import time
+import zipfile
 from math import ceil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import colab_driver as cd
+from lexausearch.cache import merge_cache_files
 
 POLL_INTERVAL_S = 30
 REPO_URL = "https://github.com/cchew/lex-au-search.git"
+# ~5min at POLL_INTERVAL_S=30s - bounds the worst-case lost work on a kill
+# (confirmed 2026-08-21: free-tier sessions get pruned at ~60min regardless
+# of resource usage or keep-alive health) to one checkpoint interval, not
+# the whole run. See checkpoint_cache()'s docstring in colab_driver.py.
+CHECKPOINT_INTERVAL_POLLS = 10
 
 
 def _shard_paths(shards_dir: Path, index: int) -> tuple[Path, Path]:
@@ -30,6 +38,39 @@ def _shard_paths(shards_dir: Path, index: int) -> tuple[Path, Path]:
         shards_dir / f"shard_{index:03d}.zip",
         shards_dir / f"shard_{index:03d}_cache.zip",
     )
+
+
+def _checkpoint_cache_path(shards_dir: Path, index: int) -> Path:
+    # Deliberately never deleted (unlike the zips above, which only appear
+    # on full success) - accumulates across every partial attempt at this
+    # shard so a retry can reseed from however far the last attempt got.
+    return shards_dir / f"shard_{index:03d}_checkpoint_cache.db"
+
+
+def _pull_checkpoint(name: str, index: int, shards_dir: Path) -> None:
+    """Best-effort: snapshot the remote embed cache and fold it into this
+    shard's local checkpoint accumulator. Never raises - a failed or skipped
+    checkpoint cycle just means the next one tries again; it must not
+    disturb the run it's monitoring."""
+    status = cd.checkpoint_cache(name)
+    if status != "ok":
+        print(f"[shard {index}] checkpoint: {status}", file=sys.stderr)
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = Path(tmp) / "checkpoint.zip"
+        if not cd.download(name, "repo/shard_cache_checkpoint.zip", str(zip_path)):
+            print(f"[shard {index}] checkpoint: download failed", file=sys.stderr)
+            return
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extract("shard_cache_checkpoint.db", tmp)
+        except (zipfile.BadZipFile, KeyError) as e:
+            print(f"[shard {index}] checkpoint: bad zip - {e}", file=sys.stderr)
+            return
+        extracted = Path(tmp) / "shard_cache_checkpoint.db"
+        shards_dir.mkdir(parents=True, exist_ok=True)
+        rows = merge_cache_files([extracted], _checkpoint_cache_path(shards_dir, index))
+    print(f"[shard {index}] checkpoint: merged ({rows} rows read)", file=sys.stderr)
 
 
 def run_shard(index: int, shard_size: int, shards_dir: Path, gpu: str) -> bool:
@@ -50,6 +91,17 @@ def run_shard(index: int, shard_size: int, shards_dir: Path, gpu: str) -> bool:
             print(f"[shard {index}] verify_session failed (no CUDA) - stopping session", file=sys.stderr)
             return False
 
+        checkpoint_cache_path = _checkpoint_cache_path(shards_dir, index)
+        if checkpoint_cache_path.exists():
+            print(
+                f"[shard {index}] seeding remote cache from prior partial "
+                f"attempt ({checkpoint_cache_path}) ...", file=sys.stderr,
+            )
+            # /content/ (not repo/) - survives the remote_cmd's `rm -rf repo`
+            # below, which colab_ingest_shard.sh relies on to find it.
+            if not cd.upload(name, str(checkpoint_cache_path), "/content/shard_cache_seed.db"):
+                print(f"[shard {index}] seed upload failed - continuing without it", file=sys.stderr)
+
         remote_cmd = (
             f"rm -rf repo && git clone --depth 1 {REPO_URL} repo && "
             f"cd repo && bash scripts/colab_ingest_shard.sh {index} {shard_size}"
@@ -57,14 +109,33 @@ def run_shard(index: int, shard_size: int, shards_dir: Path, gpu: str) -> bool:
         pid = cd.run_background(name, remote_cmd)
         print(f"[shard {index}] running as PID {pid} ...", file=sys.stderr)
 
+        poll_count = 0
         while True:
             time.sleep(POLL_INTERVAL_S)
             status = cd.poll_status(name, pid)
             if status == "running":
+                print(f"[shard {index}] {cd.sample_resources(name)}", file=sys.stderr)
+                poll_count += 1
+                if poll_count % CHECKPOINT_INTERVAL_POLLS == 0:
+                    _pull_checkpoint(name, index, shards_dir)
                 continue
             if status == "done":
                 break
-            print(f"[shard {index}] failed - last log:\n{cd.tail_log(name)}", file=sys.stderr)
+            if status == "session_lost":
+                # VM/kernel is unreachable - diagnose_failure and tail_log
+                # would just re-exec against the same dead session (extra
+                # timeout latency, no new information). No progress is
+                # preserved for this shard; it must be retried from scratch.
+                print(
+                    f"[shard {index}] session lost mid-run - Colab-side "
+                    f"disconnect/preemption, job outcome unknown, no evidence "
+                    f"of OOM or other in-process cause. Retry from scratch.",
+                    file=sys.stderr,
+                )
+                return False
+            diagnosis = cd.diagnose_failure(name, pid)
+            print(f"[shard {index}] failed - {diagnosis}", file=sys.stderr)
+            print(f"[shard {index}] last log:\n{cd.tail_log(name, n=200)}", file=sys.stderr)
             return False
 
         shards_dir.mkdir(parents=True, exist_ok=True)

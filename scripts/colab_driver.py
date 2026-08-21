@@ -26,6 +26,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
+import uuid
 
 _ENV = {**os.environ, "OAUTHLIB_RELAX_TOKEN_SCOPE": "1"}
 _CUDA_CHECK = (
@@ -122,8 +125,92 @@ def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> st
         # real in-progress work over one transient exec-latency hiccup.
         return "running"
     if result.returncode != 0:
-        return "failed"
+        # `colab exec` itself failed - our status-check probe never ran on
+        # the VM at all, so nothing is known about the job process. This is
+        # the VM/kernel being unreachable (Colab-side disconnect/preemption,
+        # e.g. "Session 'NAME' not found"), not a job-level failure the probe
+        # would otherwise have reported via _parse_poll_output. Confirmed
+        # 2026-08-17: shard 0's failure was exactly this case, and the old
+        # code here reported it as "failed" indistinguishable from a real
+        # in-process crash.
+        return "session_lost"
     return _parse_poll_output(result.stdout)
+
+
+def _format_diagnosis(stdout: str) -> str:
+    parts = stdout.split()
+    if len(parts) >= 2 and parts[1] == "DONE":
+        code = parts[2] if len(parts) > 2 else ""
+        return f"exited with code {code} (job.exitcode written)"
+    if not parts or parts[0] not in ("ALIVE", "DEAD"):
+        # The probe itself never ran - no ALIVE/DEAD token came back, so the
+        # remote VM is unreachable (typically `colab exec` printing "Session
+        # 'NAME' not found" after Colab dropped the runtime and the local
+        # registry desynced). Nothing whatsoever is known about the job
+        # process here; reporting an OOM kill would be inventing evidence for
+        # whichever theory is currently in favour. This is the signature the
+        # real 2026-08-17 shard 0 failure left behind.
+        return (
+            f"session unreachable - no status returned from the VM "
+            f"(Colab-side disconnect/preemption; job outcome unknown). "
+            f"Probe output: {stdout.strip()!r}"
+        )
+    return (
+        "crashed hard - process gone, job.exitcode never written "
+        "(SIGKILL/OOM-killer signature)"
+    )
+
+
+def diagnose_failure(name: str, pid: int, exit_code_path: str = "job.exitcode") -> str:
+    """Human-readable diagnosis for a failed shard: distinguishes a clean
+    nonzero exit (real exit code available) from a hard crash (process gone,
+    exit-code file never written - the signature of the whole remote process
+    tree being SIGKILLed at once, e.g. by the OOM killer)."""
+    check = (
+        "import os\n"
+        f"alive = os.path.exists('/proc/{pid}')\n"
+        f"done = os.path.exists({exit_code_path!r})\n"
+        f"code = open({exit_code_path!r}).read().strip() if done else ''\n"
+        "print('ALIVE' if alive else 'DEAD', 'DONE' if done else 'PENDING', code)\n"
+    )
+    result = _colab("exec", "-s", name, timeout=60, input_str=check)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return (
+            f"session unreachable - colab exec itself failed (rc={result.returncode}): "
+            f"{detail!r}. Colab-side disconnect/preemption; job outcome unknown, "
+            f"no evidence of OOM or any other in-process cause."
+        )
+    return _format_diagnosis(result.stdout)
+
+
+def sample_resources(name: str) -> str:
+    """One-line system RAM + GPU memory snapshot from the remote session -
+    call on each poll cycle to see the memory trend leading up to a
+    failure. A steady climb toward the ceiling before death points at our
+    own process; a session that just vanishes with no such trend points at
+    Colab-side preemption instead (see _release_orphaned_assignments)."""
+    code = (
+        "import subprocess\n"
+        "mem = subprocess.run(['free', '-m'], capture_output=True, text=True).stdout.splitlines()\n"
+        "mem_line = mem[1] if len(mem) > 1 else 'unavailable'\n"
+        "gpu = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', "
+        "'--format=csv,noheader,nounits'], capture_output=True, text=True).stdout.strip() or 'unavailable'\n"
+        "print(f'RAM(MB): {mem_line} | GPU(MB used,total): {gpu}')\n"
+    )
+    try:
+        # Padded like verify_session's 90s, not poll_status's 60s: this call
+        # additionally shells out twice on the remote (free -m, nvidia-smi)
+        # on top of the same exec-attach latency variance (confirmed
+        # 2026-08-04: 21-60s+), so 30s alone is too tight and did cause a
+        # real TimeoutExpired that aborted a healthy run (2026-08-21).
+        result = _colab("exec", "-s", name, timeout=90, input_str=code)
+    except subprocess.TimeoutExpired:
+        # Best-effort diagnostic riding alongside the real status check -
+        # must never abort the run it's monitoring just because one sample
+        # was slow. The next poll cycle tries again.
+        return "sample timed out"
+    return result.stdout.strip() or "sample failed"
 
 
 def tail_log(name: str, log_path: str = "job.log", n: int = 50) -> str:
@@ -147,6 +234,142 @@ def download(name: str, remote_path: str, local_path: str) -> bool:
         remote_path = f"/content/{remote_path}"
     result = _colab("download", "-s", name, remote_path, local_path, timeout=600)
     return result.returncode == 0
+
+
+_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB, conservative
+
+# `colab upload`'s underlying transport (colab_cli.contents.ContentsClient.
+# upload) reads the WHOLE local file, base64-encodes it (~33% larger), and
+# sends it as ONE JSON PUT request - its payload schema has a "chunk" field
+# but the client always hardcodes chunk=1, so nothing upstream ever actually
+# splits a large file. A 174.6MB checkpoint cache upload was rejected
+# outright (fast, clean nonzero exit - not a timeout), almost certainly a
+# proxy/server body-size limit on that single ~232MB request (confirmed
+# 2026-08-21). Since our checkpoint accumulator only grows across retries,
+# this isn't a one-off - split client-side into small pieces uploaded
+# separately via the same (working) single-file path, then reassemble
+# remotely with a small Python script.
+
+
+def upload(name: str, local_path: str, remote_path: str) -> bool:
+    """Upload local_path to remote_path, anchoring a relative remote_path to
+    /content (same quirk as download()). Transparently chunks files above
+    _UPLOAD_CHUNK_SIZE - see that constant's comment for why."""
+    if not remote_path.startswith("/"):
+        remote_path = f"/content/{remote_path}"
+    if os.path.getsize(local_path) <= _UPLOAD_CHUNK_SIZE:
+        return _upload_whole(name, local_path, remote_path)
+    return _upload_chunked(name, local_path, remote_path)
+
+
+def _upload_whole(name: str, local_path: str, remote_path: str) -> bool:
+    result = _colab("upload", "-s", name, local_path, remote_path, timeout=180)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        print(f"[colab_driver] upload {local_path} -> {remote_path} failed: {detail}", file=sys.stderr)
+        return False
+    return True
+
+
+def _upload_chunked(name: str, local_path: str, remote_path: str) -> bool:
+    # Every attempt gets its own token in its part filenames, rather than
+    # a fixed .partNNNN name cleaned up before use - a first cut of this
+    # relied on an explicit cleanup exec first, but that made correctness
+    # depend on the cleanup call itself succeeding (it doesn't live outside
+    # repo/, so a prior failed attempt's leftover parts survive the
+    # `rm -rf repo` callers run before re-seeding). If cleanup were skipped
+    # or timed out and an earlier attempt used a *different* chunk count,
+    # reassembly would silently glob in those stale extra/missing parts and
+    # produce a corrupt seed file instead of failing loudly. A unique token
+    # makes that impossible: reassembly only ever globs this attempt's own
+    # parts, so any stale files from earlier attempts are simply never
+    # matched (and are harmless dead weight - the VM is torn down at
+    # session end regardless).
+    token = uuid.uuid4().hex[:8]
+
+    index = 0
+    with open(local_path, "rb") as f:
+        while True:
+            chunk = f.read(_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp.write(chunk)
+                    tmp_path = tmp.name
+                part_remote = f"{remote_path}.{token}.part{index:04d}"
+                if not _upload_whole(name, tmp_path, part_remote):
+                    return False
+            finally:
+                if tmp_path:
+                    os.remove(tmp_path)
+            index += 1
+
+    reassemble = (
+        "import glob, os\n"
+        f"parts = sorted(glob.glob({remote_path!r} + '.{token}.part*'))\n"
+        f"with open({remote_path!r}, 'wb') as out:\n"
+        "    for p in parts:\n"
+        "        with open(p, 'rb') as pf:\n"
+        "            out.write(pf.read())\n"
+        "        os.remove(p)\n"
+        "print('REASSEMBLE_OK', len(parts))\n"
+    )
+    result = _colab("exec", "-s", name, timeout=120, input_str=reassemble)
+    if "REASSEMBLE_OK" not in result.stdout:
+        detail = (result.stderr or result.stdout).strip()
+        print(f"[colab_driver] chunked upload reassembly failed for {remote_path}: {detail}", file=sys.stderr)
+        return False
+    return True
+
+
+def checkpoint_cache(name: str, cache_path: str = "shard_cache.db") -> str:
+    """Best-effort mid-run snapshot of the remote embedding cache, taken via
+    SQLite's online backup API rather than a raw file copy - the ingest job
+    on the other end keeps writing to cache_path throughout the run (see
+    EmbedCache.put_batch's per-Act commit), and a raw copy could read a
+    torn page mid-write. Snapshotting periodically means a session that
+    gets killed mid-run (e.g. the confirmed ~60min free-tier cap, see
+    2026-08-21 shard 0 history) only loses the interval since the last
+    checkpoint, not the whole run - the recovered .db can reseed a retry so
+    already-embedded chunks are cache hits instead of being re-embedded
+    from scratch (Indexer._upsert_chunks_with_cache only calls the GPU
+    embedder for cache misses).
+
+    Returns one of "ok" (repo/shard_cache_checkpoint.zip ready to download),
+    "no_db" (nothing embedded yet), "failed", or "timeout" - never raises,
+    since a failed snapshot attempt must not disturb the job it's
+    snapshotting alongside.
+    """
+    code = (
+        "import sqlite3, os, zipfile\n"
+        "os.chdir('/content/repo')\n"
+        f"cache_path = {cache_path!r}\n"
+        "if not os.path.exists(cache_path):\n"
+        "    print('CHECKPOINT_NO_DB')\n"
+        "else:\n"
+        "    try:\n"
+        "        src = sqlite3.connect(cache_path)\n"
+        "        dst = sqlite3.connect('shard_cache_checkpoint.db')\n"
+        "        src.backup(dst)\n"
+        "        dst.close()\n"
+        "        src.close()\n"
+        "        with zipfile.ZipFile('shard_cache_checkpoint.zip', 'w', zipfile.ZIP_DEFLATED) as zf:\n"
+        "            zf.write('shard_cache_checkpoint.db')\n"
+        "        print('CHECKPOINT_OK')\n"
+        "    except Exception as e:\n"
+        "        print('CHECKPOINT_FAILED', repr(e))\n"
+    )
+    try:
+        result = _colab("exec", "-s", name, timeout=90, input_str=code)
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    if "CHECKPOINT_OK" in result.stdout:
+        return "ok"
+    if "CHECKPOINT_NO_DB" in result.stdout:
+        return "no_db"
+    return "failed"
 
 
 def stop_session(name: str) -> None:
