@@ -457,6 +457,39 @@ def test_indexer_no_cache_counters_stay_zero(privacy_chunks):
     assert idx.cache_misses == 0
 
 
+def test_indexer_cache_embeds_misses_in_bounded_batches(monkeypatch):
+    """A large Act's full miss-list must not be embedded in one uncapped
+    _embed_documents() call - a real Colab run hit a CUDA OOM doing exactly
+    that for a large Act's chunks (2026-08-21: onnxruntime BFCArena failed
+    to allocate a 428MB buffer mid-attention-computation). The non-cache
+    path already batches at 32 (see upsert_chunks); the cache-aware path
+    must too."""
+    import lexausearch.indexer as indexer_mod
+    monkeypatch.setattr(indexer_mod, "_EMBED_BATCH_SIZE", 3)
+
+    client = QdrantClient(":memory:")
+    idx = Indexer(client, cache=EmbedCache(":memory:"))
+    chunks = [
+        _chunk(eid=f"sec-{i}", text=f"unique text number {i} for the batching test")
+        for i in range(7)
+    ]
+
+    call_sizes = []
+    original = client._embed_documents
+
+    def spy(texts, **kwargs):
+        call_sizes.append(len(texts))
+        return original(texts, **kwargs)
+
+    monkeypatch.setattr(client, "_embed_documents", spy)
+    idx.upsert_chunks(chunks)
+
+    assert len(call_sizes) > 1  # split into more than one call
+    assert all(size <= 3 for size in call_sizes)
+    assert sum(call_sizes) == 7
+    assert idx.cache_misses == 7
+
+
 def test_dense_model_is_snowflake_arctic_embed_l():
     from lexausearch import indexer
     assert indexer.DENSE_MODEL == "snowflake/snowflake-arctic-embed-l"

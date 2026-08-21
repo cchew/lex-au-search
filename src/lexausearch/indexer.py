@@ -24,6 +24,14 @@ SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
 
+# Matches the non-cache path's batch_size=32 (see upsert_chunks below). The
+# cache-aware path previously embedded an Act's ENTIRE miss-list in one
+# uncapped _embed_documents() call - for a large Act with thousands of
+# never-cached chunks, that's a single unbounded ONNX call. A real Colab T4
+# run hit onnxruntime's BFCArena failing to allocate a 428MB buffer
+# mid-attention-computation from exactly this (2026-08-21).
+_EMBED_BATCH_SIZE = 32
+
 _QUANT_CONFIG = ScalarQuantization(
     scalar=ScalarQuantizationConfig(
         type=ScalarType.INT8,
@@ -125,10 +133,11 @@ class Indexer:
         miss_texts = [t for t in texts if t not in cached]
         self.cache_hits += len(texts) - len(miss_texts)
         self.cache_misses += len(miss_texts)
-        if miss_texts:
+        for i in range(0, len(miss_texts), _EMBED_BATCH_SIZE):
+            batch = miss_texts[i : i + _EMBED_BATCH_SIZE]
             fresh = dict(
                 self._client._embed_documents(
-                    miss_texts,
+                    batch,
                     embedding_model_name=self._client.embedding_model_name,
                     embed_type="passage",
                 )
