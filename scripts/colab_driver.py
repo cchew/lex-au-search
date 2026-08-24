@@ -236,7 +236,7 @@ def download(name: str, remote_path: str, local_path: str) -> bool:
     return result.returncode == 0
 
 
-_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB, conservative
+_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024  # 32MB
 
 # `colab upload`'s underlying transport (colab_cli.contents.ContentsClient.
 # upload) reads the WHOLE local file, base64-encodes it (~33% larger), and
@@ -249,6 +249,14 @@ _UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB, conservative
 # this isn't a one-off - split client-side into small pieces uploaded
 # separately via the same (working) single-file path, then reassemble
 # remotely with a small Python script.
+#
+# 32MB (not the original 8MB) - an isolated-session A/B test (2026-08-24,
+# 64MB payload) measured 65.1s at 8MB chunks vs 59.8s at 32MB, ~8% faster.
+# The transfer is bandwidth-bound (~11-16 Mbps effective, base64-inflated),
+# not per-request-overhead-bound, so this is close to the ceiling for a
+# chunk-size change alone - a 32MB chunk (~42.7MB base64-encoded) still
+# stays well clear of the body-size limit that rejected the ~232MB request
+# above.
 
 
 def upload(name: str, local_path: str, remote_path: str) -> bool:
