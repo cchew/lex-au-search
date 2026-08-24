@@ -32,7 +32,13 @@ class EmbedCache:
         model_name: str | None = None,
     ) -> None:
         self._vector_size = vector_size
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), timeout=30.0)
+        # WAL mode is a database-level setting (persisted in the file header),
+        # so it also applies to the separate connection colab_driver.checkpoint_cache
+        # opens on the VM to back up this same file mid-run - without it, that
+        # backup's read lock can starve this connection's writer past its
+        # busy timeout ("database is locked", observed live 2026-08-24 on shard 0).
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS embed_cache (id TEXT PRIMARY KEY, vector BLOB NOT NULL)"
         )
