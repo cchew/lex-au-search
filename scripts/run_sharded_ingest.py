@@ -80,13 +80,21 @@ def run_shard(index: int, shard_size: int, shards_dir: Path, gpu: str) -> bool:
         return True
 
     name = f"lexau-shard-{index}"
-    print(f"[shard {index}] creating session ...", file=sys.stderr)
-    created = cd.create_session(name, gpu=gpu)
-    if not created["ok"]:
-        print(f"[shard {index}] create_session failed: {created['stderr']}", file=sys.stderr)
-        return False
-
     try:
+        print(f"[shard {index}] creating session ...", file=sys.stderr)
+        created = cd.create_session(name, gpu=gpu)
+        if not created["ok"]:
+            # `colab new` can register a real session both on Colab's backend
+            # and in the CLI's own local registry even when this subprocess
+            # call exits nonzero for an unrelated reason afterward - don't
+            # skip cleanup just because we can't tell from here. The
+            # `finally` below unconditionally sweeps orphaned assignments
+            # (confirmed necessary 2026-08-27: this exact path leaked a
+            # session three times in one session, each cascading into every
+            # later shard failing with TooManyAssignmentsError).
+            print(f"[shard {index}] create_session failed: {created['stderr']}", file=sys.stderr)
+            return False
+
         if not cd.verify_session(name):
             print(f"[shard {index}] verify_session failed (no CUDA) - stopping session", file=sys.stderr)
             return False
