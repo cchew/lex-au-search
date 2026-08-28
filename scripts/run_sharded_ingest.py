@@ -172,23 +172,38 @@ def main() -> None:
     ap.add_argument("--shard-size", type=int, default=300)
     ap.add_argument("--shards-dir", type=Path, default=Path("./shards"))
     ap.add_argument("--gpu", default="T4")
+    ap.add_argument("--skip-shards", default="",
+                     help="Comma-separated shard indices to leave untouched this run "
+                          "(e.g. a pathologically large shard being handled manually). "
+                          "Skipped shards are not attempted, not counted as failed, and "
+                          "not listed in the merge instructions - add them by hand.")
     args = ap.parse_args()
 
+    skip = {int(x) for x in args.skip_shards.split(",") if x.strip() != ""}
+
     total_shards = ceil(args.total_acts / args.shard_size)
-    results = {i: run_shard(i, args.shard_size, args.shards_dir, args.gpu) for i in range(total_shards)}
+    run_indices = [i for i in range(total_shards) if i not in skip]
+    if skip:
+        print(f"skipping shard(s) {sorted(skip)} - handle manually and merge in by hand",
+              file=sys.stderr)
+    results = {i: run_shard(i, args.shard_size, args.shards_dir, args.gpu) for i in run_indices}
 
     failed = [i for i, ok in results.items() if not ok]
-    print(json.dumps({"total_shards": total_shards, "failed_shards": failed}, indent=2))
+    print(json.dumps({"total_shards": total_shards, "skipped_shards": sorted(skip),
+                      "failed_shards": failed}, indent=2))
     if failed:
         print(f"\n{len(failed)} shard(s) failed: {failed}. Re-run this script to retry them.",
               file=sys.stderr)
         sys.exit(1)
 
     storage_dirs = ",".join(
-        str((args.shards_dir / f"shard_{i:03d}").with_suffix("")) for i in range(total_shards)
+        str((args.shards_dir / f"shard_{i:03d}").with_suffix("")) for i in run_indices
     )
+    scope = f"All {len(run_indices)} attempted shards" if skip else f"All {total_shards} shards"
     print(
-        f"\nAll {total_shards} shards downloaded to {args.shards_dir}/. Unzip each shard_NNN.zip "
+        f"\n{scope} downloaded to {args.shards_dir}/"
+        + (f" (skipped {sorted(skip)} - merge those in manually)." if skip else ".")
+        + " Unzip each shard_NNN.zip "
         f"and shard_NNN_cache.zip, then run:\n"
         f"  lex-au-search merge-shards "
         f"--shard-storage-dirs <unzipped storage dirs, comma-separated> "
