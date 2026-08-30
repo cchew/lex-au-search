@@ -24,13 +24,17 @@ SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
 
-# Matches the non-cache path's batch_size=32 (see upsert_chunks below). The
-# cache-aware path previously embedded an Act's ENTIRE miss-list in one
+# The cache-aware path previously embedded an Act's ENTIRE miss-list in one
 # uncapped _embed_documents() call - for a large Act with thousands of
 # never-cached chunks, that's a single unbounded ONNX call. A real Colab T4
 # run hit onnxruntime's BFCArena failing to allocate a 428MB buffer
-# mid-attention-computation from exactly this (2026-08-21).
-_EMBED_BATCH_SIZE = 32
+# mid-attention-computation from exactly this (2026-08-21), so this was
+# first capped at 32. Shards 7 and 9 still OOM'd at 32 on a T4 (BFCArena
+# failing a ~485MB attention-MatMul buffer with GPU already near 15GB,
+# 2026-08-31) - dropped to 16. The non-cache path (upsert_chunks) still
+# passes batch_size=32 to fastembed directly; only the cache-miss loop
+# here uses this smaller cap.
+_EMBED_BATCH_SIZE = 16
 
 _QUANT_CONFIG = ScalarQuantization(
     scalar=ScalarQuantizationConfig(
