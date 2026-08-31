@@ -1,4 +1,5 @@
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from backends.base import IngestBackend, ShardResult, shard_paths, checkpoint_cache_path
+from backends import get_backend
+from backends.colab import ColabBackend
 
 
 def test_shard_result_fields():
@@ -47,3 +50,23 @@ def test_shard_paths_zero_pads_to_three_digits():
 
 def test_checkpoint_cache_path_matches_contract():
     assert checkpoint_cache_path(Path("/x/shards"), 0) == Path("/x/shards/shard_000_checkpoint_cache.db")
+
+
+def _args(tmp_path):
+    return types.SimpleNamespace(shards_dir=tmp_path, gpu="T4")
+
+
+def test_get_backend_colab(tmp_path):
+    be = get_backend("colab", _args(tmp_path))
+    assert isinstance(be, ColabBackend)
+    assert be.shards_dir == tmp_path and be.gpu == "T4"
+
+
+def test_get_backend_runpod_not_yet_implemented(tmp_path):
+    with pytest.raises(NotImplementedError):
+        get_backend("runpod", _args(tmp_path))
+
+
+def test_get_backend_unknown(tmp_path):
+    with pytest.raises(ValueError):
+        get_backend("bogus", _args(tmp_path))
