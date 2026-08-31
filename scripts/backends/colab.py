@@ -23,8 +23,10 @@ from backends.base import IngestBackend, ShardResult, checkpoint_cache_path, sha
 
 POLL_INTERVAL_S = 30
 REPO_URL = "https://github.com/cchew/lex-au-search.git"
-# ~5min at POLL_INTERVAL_S=30s - bounds worst-case lost work on a kill to one
-# checkpoint interval. See checkpoint_cache() in colab_driver.py.
+# ~5min at POLL_INTERVAL_S=30s - bounds the worst-case lost work on a kill
+# (confirmed 2026-08-21: free-tier sessions get pruned at ~60min regardless
+# of resource usage or keep-alive health) to one checkpoint interval, not
+# the whole run. See checkpoint_cache()'s docstring in colab_driver.py.
 CHECKPOINT_INTERVAL_POLLS = 10
 
 
@@ -65,11 +67,22 @@ class ColabBackend(IngestBackend):
     def run_shard(self, index: int, shard_size: int, seed_cache: Path | None) -> ShardResult:
         zip_path, cache_zip_path = shard_paths(self.shards_dir, index)
         name = f"lexau-shard-{index}"
-        fail = lambda msg: ShardResult(index, False, None, None, msg)
+
+        def fail(msg: str) -> ShardResult:
+            return ShardResult(index, False, None, None, msg)
+
         try:
             print(f"[shard {index}] creating session ...", file=sys.stderr)
             created = cd.create_session(name, gpu=self.gpu)
             if not created["ok"]:
+                # `colab new` can register a real session both on Colab's backend
+                # and in the CLI's own local registry even when this subprocess
+                # call exits nonzero for an unrelated reason afterward - don't
+                # skip cleanup just because we can't tell from here. The
+                # `finally` below unconditionally sweeps orphaned assignments
+                # (confirmed necessary 2026-08-27: this exact path leaked a
+                # session three times in one session, each cascading into every
+                # later shard failing with TooManyAssignmentsError).
                 print(f"[shard {index}] create_session failed: {created['stderr']}", file=sys.stderr)
                 return fail(f"create_session failed: {created['stderr']}")
 
@@ -79,6 +92,8 @@ class ColabBackend(IngestBackend):
 
             if seed_cache is not None and seed_cache.exists():
                 print(f"[shard {index}] seeding remote cache from {seed_cache} ...", file=sys.stderr)
+                # /content/ (not repo/) - survives the remote_cmd's `rm -rf repo`
+                # below, which colab_ingest_shard.sh relies on to find it.
                 if not cd.upload(name, str(seed_cache), "/content/shard_cache_seed.db"):
                     print(f"[shard {index}] seed upload failed - continuing without it", file=sys.stderr)
 
@@ -102,9 +117,14 @@ class ColabBackend(IngestBackend):
                 if status == "done":
                     break
                 if status == "session_lost":
+                    # VM/kernel is unreachable - diagnose_failure and tail_log
+                    # would just re-exec against the same dead session (extra
+                    # timeout latency, no new information). No progress is
+                    # preserved for this shard; it must be retried from scratch.
                     msg = (
                         "session lost mid-run - Colab-side disconnect/preemption, "
-                        "job outcome unknown. Retry from scratch."
+                        "job outcome unknown, no evidence of OOM or other in-process "
+                        "cause. Retry from scratch."
                     )
                     print(f"[shard {index}] {msg}", file=sys.stderr)
                     return fail(msg)
@@ -122,6 +142,10 @@ class ColabBackend(IngestBackend):
             print(f"[shard {index}] done -> {zip_path}", file=sys.stderr)
             return ShardResult(index, True, zip_path, cache_zip_path, "")
         except Exception as e:  # noqa: BLE001 - one shard's failure must not crash the run
+            # A transient colab_driver failure (e.g. an exec call timing out on
+            # real backend latency, see reference-google-colab-cli-kernelclient-bug
+            # memory) must fail only this shard, not crash the whole multi-shard
+            # run - subsequent shards, and a later retry of this one, still work.
             print(f"[shard {index}] unexpected error: {e}", file=sys.stderr)
             return fail(f"unexpected error: {e}")
         finally:

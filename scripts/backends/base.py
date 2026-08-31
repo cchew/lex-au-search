@@ -52,6 +52,13 @@ class IngestBackend(ABC):
         `lexausearch.cache.merge_cache_files` - progress up to the last
         successful mid-run snapshot (the final interval may be lost, matching
         Colab's existing `session_lost` behaviour).
+
+        Canonical zip-path contract: on an `ok=True` return the backend MUST
+        have written both the storage zip and the cache zip to
+        `shard_paths(shards_dir, index)` (the same `shards_dir` the backend
+        was constructed with); `run_sharded_ingest.run_all` decides a shard is
+        already done on the next run by testing exactly
+        `shard_paths(shards_dir, index)[0].exists()`.
         """
 
     @abstractmethod

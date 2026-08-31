@@ -30,8 +30,8 @@ def run_all(
     shards_dir: Path,
 ) -> dict[int, bool]:
     results: dict[int, bool] = {}
-    backend.prepare()
     try:
+        backend.prepare()
         for i in run_indices:
             if shard_paths(shards_dir, i)[0].exists():
                 print(f"[shard {i}] already downloaded, skipping", file=sys.stderr)

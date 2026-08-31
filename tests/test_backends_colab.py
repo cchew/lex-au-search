@@ -1,6 +1,6 @@
 # tests/test_backends_colab.py
 import sys
-import types
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
@@ -66,7 +66,7 @@ class _Recorder:
 
 def _install_recorder(monkeypatch, rec):
     for attr in dir(rec):
-        if not attr.startswith("__"):
+        if not attr.startswith("__") and callable(getattr(rec, attr)):
             monkeypatch.setattr(colab_mod.cd, attr, getattr(rec, attr), raising=False)
 
 
@@ -121,6 +121,45 @@ def test_checkpoint_pulled_on_interval(monkeypatch, tmp_path):
     ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, seed_cache=None)
 
     assert rec.checkpoint_calls == 1
+
+
+def test_checkpoint_pull_writes_accumulator_on_success(monkeypatch, tmp_path):
+    # Same interval trigger as above, but checkpoint_cache() -> "ok" so the
+    # download -> zip extract -> merge_cache_files accumulator path actually
+    # runs (spec §11.1: accumulator write on simulated mid-run kill).
+    class _CheckpointRecorder(_Recorder):
+        def checkpoint_cache(self, name, cache_path="shard_cache.db"):
+            self.checkpoint_calls += 1
+            return "ok"
+
+        def download(self, name, remote, local):
+            self.calls.append(("download", remote))
+            if remote == "repo/shard_cache_checkpoint.zip":
+                with zipfile.ZipFile(local, "w") as zf:
+                    zf.writestr("shard_cache_checkpoint.db", b"sqlite-bytes")
+            else:
+                Path(local).write_bytes(b"zip")
+            return True
+
+    rec = _CheckpointRecorder(poll_sequence=["running"] * 10 + ["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+
+    merge_args = {}
+
+    def _fake_merge(sources, target):
+        merge_args["sources"] = list(sources)
+        merge_args["target"] = target
+        return 7
+
+    monkeypatch.setattr(colab_mod, "merge_cache_files", _fake_merge)
+
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, seed_cache=None)
+
+    assert rec.checkpoint_calls == 1
+    assert merge_args["target"] == checkpoint_cache_path(tmp_path, 0)
+    assert len(merge_args["sources"]) == 1
+    assert Path(merge_args["sources"][0]).name == "shard_cache_checkpoint.db"
 
 
 def test_teardown_sweeps_orphans(monkeypatch, tmp_path):
