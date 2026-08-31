@@ -61,12 +61,26 @@ def _parse_pid_output(stdout: str) -> int:
 
 
 def _parse_poll_output(stdout: str) -> str:
-    if "DONE" in stdout:
-        code = stdout.strip().split()[-1]
-        return "done" if code == "0" else "failed"
-    if "ALIVE" in stdout:
+    """Classify a poll probe. Probe prints two tokens: `<ALIVE|DEAD> <content>`
+    where content is the job.exitcode file's contents - `RUNNING` (sentinel
+    written at launch), an integer exit code, or `MISSING` (file absent).
+
+    Decide on content, never on process liveness: run_background's `_wait()`
+    thread writes the real code only *after* the launched process is reaped, so
+    there is always a window where the process is DEAD but the sentinel still
+    reads RUNNING. Treating that window as a crash (the pre-2026-09-01 bug)
+    misreports a shard that finished between two polls. A genuine kernel kill
+    is caught elsewhere - the probe's own `colab exec` fails and poll_status
+    returns `session_lost` - not here."""
+    parts = stdout.split()
+    if len(parts) < 2:
+        return "failed"  # malformed probe output - treat as a failure to surface it
+    content = parts[1]
+    if content in ("RUNNING", "EMPTY"):
         return "running"
-    return "failed"  # process gone but no exit-code file written - crashed hard
+    if content == "MISSING":
+        return "failed"  # launch wrapper never wrote the sentinel
+    return "done" if content == "0" else "failed"  # content is the real exit code
 
 
 def create_session(name: str, gpu: str = "T4") -> dict:
@@ -85,6 +99,35 @@ def verify_session(name: str) -> bool:
     return _parse_verify_output(result.returncode, result.stdout)
 
 
+def _build_run_wrapper(remote_command: str, log_path: str, exit_code_path: str) -> str:
+    """The Python snippet run_background sends to the remote kernel to launch
+    remote_command detached and record its outcome.
+
+    job.exitcode holds a `RUNNING` sentinel from the moment of launch and is
+    replaced atomically (write-temp-then-os.replace) with the real exit code
+    when the process finishes - so a poll can only ever read the sentinel or a
+    complete integer, never an absent or half-written file. The pre-2026-09-01
+    version created the file lazily inside `_wait()` after the process was
+    already reaped, leaving a window a poll could catch and misread as a crash
+    (Task 6 Colab smoke, 2026-09-01)."""
+    return (
+        "import subprocess, threading, os\n"
+        f"_ec = {exit_code_path!r}\n"
+        "with open(_ec, 'w') as _f:\n"
+        "    _f.write('RUNNING'); _f.flush(); os.fsync(_f.fileno())\n"
+        f"p = subprocess.Popen(['bash', '-c', {remote_command!r}], "
+        f"stdout=open({log_path!r}, 'w'), stderr=subprocess.STDOUT)\n"
+        "def _wait():\n"
+        "    p.wait()\n"
+        "    _tmp = _ec + '.tmp'\n"
+        "    with open(_tmp, 'w') as _f:\n"
+        "        _f.write(str(p.returncode)); _f.flush(); os.fsync(_f.fileno())\n"
+        "    os.replace(_tmp, _ec)\n"
+        "threading.Thread(target=_wait, daemon=False).start()\n"
+        "print('PID', p.pid)\n"
+    )
+
+
 def run_background(
     name: str, remote_command: str, log_path: str = "job.log", exit_code_path: str = "job.exitcode"
 ) -> int:
@@ -93,30 +136,30 @@ def run_background(
     only launches the process and returns immediately, a background thread
     inside the (long-lived) kernel process writes the exit code file once
     the launched process finishes, independent of this exec call returning."""
-    wrapper = (
-        "import subprocess, threading\n"
-        f"p = subprocess.Popen(['bash', '-c', {remote_command!r}], "
-        f"stdout=open({log_path!r}, 'w'), stderr=subprocess.STDOUT)\n"
-        "def _wait():\n"
-        "    p.wait()\n"
-        f"    open({exit_code_path!r}, 'w').write(str(p.returncode))\n"
-        "threading.Thread(target=_wait, daemon=False).start()\n"
-        "print('PID', p.pid)\n"
-    )
+    wrapper = _build_run_wrapper(remote_command, log_path, exit_code_path)
     result = _colab("exec", "-s", name, timeout=60, input_str=wrapper)
     if result.returncode != 0:
         raise RuntimeError(f"run_background failed to launch on {name}: {result.stderr}")
     return _parse_pid_output(result.stdout)
 
 
-def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> str:
-    check = (
+def _status_probe(pid: int, exit_code_path: str) -> str:
+    """Remote snippet printing `<ALIVE|DEAD> <content>` where content is the
+    job.exitcode contents: `RUNNING`, an integer exit code, `EMPTY`, or
+    `MISSING`. See _parse_poll_output for why the decision is on content."""
+    return (
         "import os\n"
         f"alive = os.path.exists('/proc/{pid}')\n"
-        f"done = os.path.exists({exit_code_path!r})\n"
-        f"code = open({exit_code_path!r}).read().strip() if done else ''\n"
-        "print('ALIVE' if alive else 'DEAD', 'DONE' if done else 'PENDING', code)\n"
+        "try:\n"
+        f"    content = open({exit_code_path!r}).read().strip() or 'EMPTY'\n"
+        "except FileNotFoundError:\n"
+        "    content = 'MISSING'\n"
+        "print('ALIVE' if alive else 'DEAD', content)\n"
     )
+
+
+def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> str:
+    check = _status_probe(pid, exit_code_path)
     try:
         result = _colab("exec", "-s", name, timeout=60, input_str=check)
     except subprocess.TimeoutExpired:
@@ -139,9 +182,6 @@ def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> st
 
 def _format_diagnosis(stdout: str) -> str:
     parts = stdout.split()
-    if len(parts) >= 2 and parts[1] == "DONE":
-        code = parts[2] if len(parts) > 2 else ""
-        return f"exited with code {code} (job.exitcode written)"
     if not parts or parts[0] not in ("ALIVE", "DEAD"):
         # The probe itself never ran - no ALIVE/DEAD token came back, so the
         # remote VM is unreachable (typically `colab exec` printing "Session
@@ -155,24 +195,26 @@ def _format_diagnosis(stdout: str) -> str:
             f"(Colab-side disconnect/preemption; job outcome unknown). "
             f"Probe output: {stdout.strip()!r}"
         )
-    return (
-        "crashed hard - process gone, job.exitcode never written "
-        "(SIGKILL/OOM-killer signature)"
-    )
+    content = parts[1] if len(parts) > 1 else ""
+    if content == "MISSING":
+        return "job.exitcode file missing - the launch wrapper never ran"
+    if content in ("RUNNING", "EMPTY", ""):
+        # diagnose_failure is only reached once _parse_poll_output returned
+        # "failed", and RUNNING now parses as "running" - so this branch is
+        # only hit if the sentinel state changed under us between the poll and
+        # this probe. Report it plainly; do not fabricate an OOM cause.
+        return (
+            f"job outcome undetermined - process gone but exit code never "
+            f"recorded (probe: {stdout.strip()!r})"
+        )
+    return f"exited with code {content} (job.exitcode written)"
 
 
 def diagnose_failure(name: str, pid: int, exit_code_path: str = "job.exitcode") -> str:
-    """Human-readable diagnosis for a failed shard: distinguishes a clean
-    nonzero exit (real exit code available) from a hard crash (process gone,
-    exit-code file never written - the signature of the whole remote process
-    tree being SIGKILLed at once, e.g. by the OOM killer)."""
-    check = (
-        "import os\n"
-        f"alive = os.path.exists('/proc/{pid}')\n"
-        f"done = os.path.exists({exit_code_path!r})\n"
-        f"code = open({exit_code_path!r}).read().strip() if done else ''\n"
-        "print('ALIVE' if alive else 'DEAD', 'DONE' if done else 'PENDING', code)\n"
-    )
+    """Human-readable diagnosis for a failed shard: a clean nonzero exit
+    (real exit code available), a missing sentinel (the launch wrapper never
+    ran), or a session that went unreachable (colab exec itself failed)."""
+    check = _status_probe(pid, exit_code_path)
     result = _colab("exec", "-s", name, timeout=60, input_str=check)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()

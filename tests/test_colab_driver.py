@@ -36,35 +36,30 @@ def test_parse_pid_output_raises_when_no_pid_present():
         _parse_pid_output("no pid here")
 
 
-def test_parse_poll_output_running_when_alive_and_not_done():
-    assert _parse_poll_output("ALIVE PENDING \n") == "running"
+def test_parse_poll_output_running_when_alive_and_sentinel_present():
+    assert _parse_poll_output("ALIVE RUNNING\n") == "running"
 
 
 def test_parse_poll_output_done_on_zero_exit_code():
-    assert _parse_poll_output("DEAD DONE 0\n") == "done"
+    assert _parse_poll_output("DEAD 0\n") == "done"
 
 
 def test_parse_poll_output_failed_on_nonzero_exit_code():
-    assert _parse_poll_output("DEAD DONE 1\n") == "failed"
-
-
-def test_parse_poll_output_failed_when_process_gone_without_exit_code():
-    assert _parse_poll_output("DEAD PENDING \n") == "failed"
+    assert _parse_poll_output("DEAD 1\n") == "failed"
 
 
 def test_format_diagnosis_reports_exit_code_on_clean_exit():
-    assert _format_diagnosis("DEAD DONE 1\n") == "exited with code 1 (job.exitcode written)"
+    assert _format_diagnosis("DEAD 1\n") == "exited with code 1 (job.exitcode written)"
 
 
 def test_format_diagnosis_reports_exit_code_zero():
-    assert _format_diagnosis("DEAD DONE 0\n") == "exited with code 0 (job.exitcode written)"
+    assert _format_diagnosis("DEAD 0\n") == "exited with code 0 (job.exitcode written)"
 
 
-def test_format_diagnosis_reports_hard_crash_when_no_exit_code():
-    assert _format_diagnosis("DEAD PENDING \n") == (
-        "crashed hard - process gone, job.exitcode never written "
-        "(SIGKILL/OOM-killer signature)"
-    )
+def test_format_diagnosis_reports_missing_sentinel_when_launch_never_ran():
+    out = _format_diagnosis("DEAD MISSING\n")
+    assert out == "job.exitcode file missing - the launch wrapper never ran"
+    assert "OOM" not in out
 
 
 def test_format_diagnosis_reports_session_unreachable_on_empty_output():
@@ -98,7 +93,20 @@ def test_poll_status_reports_running_when_probe_succeeds(monkeypatch):
     monkeypatch.setattr(
         cd, "_colab",
         lambda *a, **k: types.SimpleNamespace(
-            returncode=0, stdout="ALIVE PENDING \n", stderr="",
+            returncode=0, stdout="ALIVE RUNNING\n", stderr="",
+        ),
+    )
+    assert cd.poll_status("x", 123) == "running"
+
+
+def test_poll_status_reports_running_when_process_gone_but_exitcode_not_written(monkeypatch):
+    # The completion race that broke Task 6's Colab smoke on 2026-09-01: the
+    # launched process is reaped (DEAD) a beat before the _wait thread swaps in
+    # the real code, so the sentinel still reads RUNNING. Must not be a crash.
+    monkeypatch.setattr(
+        cd, "_colab",
+        lambda *a, **k: types.SimpleNamespace(
+            returncode=0, stdout="DEAD RUNNING\n", stderr="",
         ),
     )
     assert cd.poll_status("x", 123) == "running"
@@ -332,14 +340,55 @@ def test_checkpoint_cache_failed_when_exec_itself_fails(monkeypatch):
     assert cd.checkpoint_cache("x") == "failed"
 
 
-def test_diagnose_failure_still_reports_hard_crash_when_vm_reachable(monkeypatch):
-    # Exec succeeds (VM/kernel alive) but the job process itself is gone with
-    # no exit-code file - a genuine in-process kill, not a session loss.
+def test_diagnose_failure_reports_missing_sentinel_when_vm_reachable(monkeypatch):
+    # Exec succeeds (VM/kernel alive) but job.exitcode was never created - the
+    # launch wrapper itself never ran. Not a session loss, and not an OOM: say
+    # exactly what is known.
     monkeypatch.setattr(
         cd, "_colab",
         lambda *a, **k: types.SimpleNamespace(
-            returncode=0, stdout="DEAD PENDING \n", stderr="",
+            returncode=0, stdout="DEAD MISSING\n", stderr="",
         ),
     )
     out = cd.diagnose_failure("x", 123)
-    assert "OOM-killer signature" in out
+    assert out == "job.exitcode file missing - the launch wrapper never ran"
+    assert "OOM" not in out
+
+
+# --- exitcode-race fix (RED) ---------------------------------------------------
+# The remote _wait() thread only writes job.exitcode after the launched process
+# is reaped, so a poll can land in the window where the process is gone (DEAD)
+# and the sentinel still reads RUNNING. Task 6's 2026-09-01 Colab smoke hit
+# exactly this: the shard completed (both zips written) but the poll that caught
+# the gap classified it "failed" with a fabricated OOM diagnosis, so the
+# download never ran. New probe format is two tokens: "<ALIVE|DEAD> <content>"
+# where content is RUNNING, MISSING, or the integer exit code.
+
+def test_parse_poll_output_running_when_process_gone_but_exitcode_not_written():
+    assert _parse_poll_output("DEAD RUNNING\n") == "running"
+
+
+def test_parse_poll_output_failed_on_real_exit_code_even_while_process_alive():
+    # A recorded integer code is authoritative regardless of the /proc check.
+    assert _parse_poll_output("ALIVE 137\n") == "failed"
+
+
+def test_parse_poll_output_failed_when_exitcode_file_missing():
+    assert _parse_poll_output("DEAD MISSING\n") == "failed"
+
+
+def test_build_run_wrapper_settles_exitcode_atomically(tmp_path):
+    import time
+
+    ec = tmp_path / "job.exitcode"
+    log = tmp_path / "job.log"
+    wrapper = cd._build_run_wrapper("exit 7", str(log), str(ec))
+    exec(compile(wrapper, "<wrapper>", "exec"), {})
+
+    # never observable as absent or empty: it is the sentinel or the real code
+    assert ec.read_text() in ("RUNNING", "7")
+    for _ in range(200):
+        if ec.read_text() == "7":
+            break
+        time.sleep(0.05)
+    assert ec.read_text() == "7"
