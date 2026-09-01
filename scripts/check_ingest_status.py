@@ -66,6 +66,8 @@ def main() -> None:
     ap.add_argument("--shard-size", type=int, default=300)
     ap.add_argument("--shards-dir", type=Path, default=Path("./shards"))
     ap.add_argument("--corpus-index", type=Path, default=Path("../lex-au/repo/corpus/index.json"))
+    ap.add_argument("--backend", choices=["colab", "runpod"], default="colab",
+                    help="Which ingest backend; --probe-quota only applies to colab.")
     ap.add_argument("--probe-quota", action="store_true",
                      help="Create+stop a real T4 session to check GPU availability")
     args = ap.parse_args()
@@ -89,6 +91,9 @@ def main() -> None:
     }
 
     if args.probe_quota:
+        if args.backend == "runpod":
+            print("probe-quota is not applicable for the runpod backend")
+            return
         name = "quota-probe-status-check"
         created = cd.create_session(name, gpu="T4")
         if created["ok"]:
