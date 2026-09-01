@@ -31,7 +31,8 @@ class _Recorder:
         return True
 
     def run_background(self, name, cmd):
-        self.calls.append(("run_background", name))
+        self.last_remote_cmd = cmd
+        self.calls.append(("run_background", name, cmd))
         return 4321
 
     def poll_status(self, name, pid):
@@ -160,6 +161,18 @@ def test_checkpoint_pull_writes_accumulator_on_success(monkeypatch, tmp_path):
     assert merge_args["target"] == checkpoint_cache_path(tmp_path, 0)
     assert len(merge_args["sources"]) == 1
     assert Path(merge_args["sources"][0]).name == "shard_cache_checkpoint.db"
+
+
+def test_remote_cmd_uses_split_setup_and_ingest_scripts(monkeypatch, tmp_path):
+    rec = _Recorder(poll_sequence=["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, seed_cache=None)
+    launched = next(c for c in rec.calls if c[0] == "run_background")
+    cmd = launched[-1] if isinstance(launched[-1], str) else rec.last_remote_cmd
+    assert "bash scripts/setup_gpu_env.sh" in cmd
+    assert "bash scripts/ingest_shard.sh 0 300 /content/shard_cache_seed.db" in cmd
+    assert "colab_ingest_shard.sh" not in cmd
 
 
 def test_teardown_sweeps_orphans(monkeypatch, tmp_path):

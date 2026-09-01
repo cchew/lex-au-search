@@ -93,13 +93,14 @@ class ColabBackend(IngestBackend):
             if seed_cache is not None and seed_cache.exists():
                 print(f"[shard {index}] seeding remote cache from {seed_cache} ...", file=sys.stderr)
                 # /content/ (not repo/) - survives the remote_cmd's `rm -rf repo`
-                # below, which colab_ingest_shard.sh relies on to find it.
+                # below; passed to ingest_shard.sh as its SEED_DB_PATH arg.
                 if not cd.upload(name, str(seed_cache), "/content/shard_cache_seed.db"):
                     print(f"[shard {index}] seed upload failed - continuing without it", file=sys.stderr)
 
             remote_cmd = (
                 f"rm -rf repo && git clone --depth 1 {REPO_URL} repo && "
-                f"cd repo && bash scripts/colab_ingest_shard.sh {index} {shard_size}"
+                f"cd repo && bash scripts/setup_gpu_env.sh && "
+                f"bash scripts/ingest_shard.sh {index} {shard_size} /content/shard_cache_seed.db"
             )
             pid = cd.run_background(name, remote_cmd)
             print(f"[shard {index}] running as PID {pid} ...", file=sys.stderr)

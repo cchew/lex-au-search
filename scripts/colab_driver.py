@@ -35,7 +35,7 @@ _CUDA_CHECK = (
     # Checks GPU hardware attachment only, via torch - preinstalled on
     # stock Colab images (confirmed 2026-08-04). onnxruntime is NOT
     # preinstalled; the real onnxruntime-CUDA compatibility check happens
-    # later in colab_ingest_shard.sh, after it installs onnxruntime-gpu.
+    # later in ingest_shard.sh, after it installs onnxruntime-gpu.
     "import torch\n"
     "assert torch.cuda.is_available(), 'no CUDA device attached'\n"
     "print('CUDA_VERIFY_OK')\n"
