@@ -4,19 +4,20 @@
 # RunPod runs it once in RunPodBackend.prepare().
 set -euo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 pip install -e ".[gpu]"
-pip install huggingface_hub
 
-# onnxruntime-gpu built against CUDA 12 - the stock pip wheel is CUDA-11 and
-# silently falls back to CPU. Same fix as the original colab_ingest_shard.sh.
-pip uninstall -y onnxruntime-gpu onnxruntime
-pip install onnxruntime-gpu==1.27.0 --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+# fastembed drags in CPU-only onnxruntime; swap it for the CUDA-12 build.
+# The PyPI onnxruntime-gpu wheel has targeted CUDA 12 since 1.19 (the old
+# "stock wheel is CUDA-11" workaround feed is no longer needed), but it does
+# NOT reliably pull cuDNN, and the RunPod stock pytorch image ships no system
+# cuDNN 9 on onnxruntime's loader path - so pin the cuDNN 9 wheel explicitly.
+# preload_dlls() (in _verify_gpu.py and lexausearch.indexer) then resolves it
+# from site-packages regardless of shell / LD_LIBRARY_PATH / login state.
+pip uninstall -y onnxruntime onnxruntime-gpu
+pip install "onnxruntime-gpu>=1.20,<2" "nvidia-cudnn-cu12>=9,<10"
 
-python3 -c "
-import onnxruntime
-providers = onnxruntime.get_available_providers()
-assert 'CUDAExecutionProvider' in providers, (
-    f'CUDA not available after gpu extra install (providers: {providers}).'
-)
-print('setup_gpu_env: CUDA available, providers:', providers)
-"
+# Real GPU check - a silent CPU fall-back is invisible to
+# get_available_providers(), so force an actual CUDA InferenceSession.
+python3 "$here/_verify_gpu.py"

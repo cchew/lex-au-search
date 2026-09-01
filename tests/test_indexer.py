@@ -158,6 +158,22 @@ def test_configure_client_idempotent():
     configure_client(client)  # must not raise
 
 
+def test_module_import_triggers_onnxruntime_preload(monkeypatch):
+    # Without an explicit preload, onnxruntime-gpu never loads the
+    # nvidia-cudnn-cu12 wheel and CUDAExecutionProvider silently downgrades to
+    # CPU on the RunPod stock image.
+    import importlib
+    from lexausearch import indexer
+
+    calls = []
+    monkeypatch.setattr(
+        indexer.onnxruntime, "preload_dlls",
+        lambda *a, **k: calls.append((a, k)), raising=False,
+    )
+    importlib.reload(indexer)
+    assert len(calls) == 1
+
+
 def test_configure_client_enables_cuda_when_available(monkeypatch):
     from unittest.mock import MagicMock
     from lexausearch import indexer

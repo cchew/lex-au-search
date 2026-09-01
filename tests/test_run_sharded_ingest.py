@@ -105,3 +105,27 @@ def test_total_acts_still_required_without_reap(tmp_path):
     with pytest.raises(SystemExit) as e:
         rsi.main(["--backend", "runpod", "--shards-dir", str(tmp_path)])
     assert e.value.code == 2
+
+
+def _runpod_args(tmp_path):
+    return types.SimpleNamespace(
+        shards_dir=tmp_path, cloud_type="COMMUNITY", yes=True,
+        reuse_pod=False, keep_pod=False,
+    )
+
+
+def test_get_backend_runpod_parses_gpu_type_ids_env(tmp_path, monkeypatch):
+    from backends import get_backend
+    monkeypatch.setenv("RUNPOD_GPU_TYPE_IDS",
+                       " NVIDIA RTX A5000 , NVIDIA GeForce RTX 3090 ,, NVIDIA RTX A6000 ")
+    be = get_backend("runpod", _runpod_args(tmp_path))
+    assert be.gpu_type_ids == (
+        "NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090", "NVIDIA RTX A6000",
+    )
+
+
+def test_get_backend_runpod_gpu_type_ids_absent_is_empty(tmp_path, monkeypatch):
+    from backends import get_backend
+    monkeypatch.delenv("RUNPOD_GPU_TYPE_IDS", raising=False)
+    be = get_backend("runpod", _runpod_args(tmp_path))
+    assert be.gpu_type_ids == ()

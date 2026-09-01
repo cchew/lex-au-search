@@ -147,6 +147,31 @@ def test_prepare_reuses_matching_running_pod_with_reuse_flag(tmp_path, monkeypat
     assert (tmp_path / ".runpod_pod").read_text().strip() == "pod_leaked"
 
 
+def test_gpu_type_ids_reach_create_pod_config(tmp_path, monkeypatch):
+    rd = _FakeRD()
+    seen = {}
+    inner = rd.create_pod
+
+    def spy(cfg, dry_run=False):
+        seen["cfg"] = cfg
+        return inner(cfg, dry_run=dry_run)
+
+    rd.create_pod = spy
+    monkeypatch.setattr("backends.runpod_backend.atexit.register", lambda fn: None)
+    be = _be(tmp_path, rd, gpu_type_ids=("NVIDIA RTX A5000", "NVIDIA RTX A6000"))
+    be.prepare()
+    assert seen["cfg"].gpu_type_ids == ("NVIDIA RTX A5000", "NVIDIA RTX A6000")
+
+
+def test_cost_gate_lists_every_candidate_gpu(tmp_path, capsys):
+    be = _be(tmp_path, _FakeRD(),
+             gpu_type_ids=("NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090"))
+    be._cost_gate()
+    err = capsys.readouterr().err
+    assert "NVIDIA RTX A5000" in err and "NVIDIA GeForce RTX 3090" in err
+    assert "first available" in err
+
+
 # --------------------------------------------------------------- Task 9 tests
 
 

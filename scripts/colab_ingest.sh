@@ -8,28 +8,19 @@ set -euo pipefail
 # for the notebook cells that call this script.
 
 pip install -e ".[gpu]"
-pip install huggingface_hub
 
-# The base install above pulls in plain CPU onnxruntime as fastembed's own
-# transitive dependency, which then wins the "onnxruntime" import namespace
-# over the gpu extra's onnxruntime-gpu (confirmed 2026-07-15: T4 attached and
-# idle while ingest silently ran on CPU). The standard PyPI onnxruntime-gpu
-# wheel also targets CUDA 11, not the CUDA 12 Colab's T4 runtime provides -
-# pull the CUDA 12 build from Microsoft's ADO feed instead, uninstalling both
-# packages first so neither's stale files are left behind.
-pip uninstall -y onnxruntime-gpu onnxruntime
-pip install onnxruntime-gpu==1.27.0 --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+# fastembed pulls in plain CPU onnxruntime as a transitive dep, which then wins
+# the "onnxruntime" import namespace over the gpu extra's onnxruntime-gpu
+# (confirmed 2026-07-15: T4 attached and idle while ingest silently ran on CPU).
+# Reinstall the CUDA-12 build clean, and pin the cuDNN 9 wheel so preload_dlls()
+# (in _verify_gpu.py and lexausearch.indexer) can resolve it regardless of what
+# the runtime ships. Same setup as scripts/setup_gpu_env.sh.
+pip uninstall -y onnxruntime onnxruntime-gpu
+pip install "onnxruntime-gpu>=1.20,<2" "nvidia-cudnn-cu12>=9,<10"
 
-python3 -c "
-import onnxruntime
-providers = onnxruntime.get_available_providers()
-assert 'CUDAExecutionProvider' in providers, (
-    f'CUDA not available after gpu extra install (providers: {providers}). '
-    'Check Runtime > Change runtime type has a GPU selected, and that '
-    '!nvidia-smi shows a GPU attached.'
-)
-print('CUDA available, providers:', providers)
-"
+# Real GPU check - a silent CPU fall-back is invisible to
+# get_available_providers() (it lists build-time providers, not runtime loads).
+python3 scripts/_verify_gpu.py
 
 python3 -c "
 from huggingface_hub import snapshot_download

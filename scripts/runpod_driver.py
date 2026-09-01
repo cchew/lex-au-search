@@ -32,6 +32,11 @@ class CreatePodConfig:
     name: str
     image_name: str = STOCK_IMAGE
     gpu_type_id: str = "NVIDIA RTX A6000"
+    # Ordered preference list. When non-empty it is sent verbatim as
+    # `gpuTypeIds` and RunPod picks the first type with capacity; when empty
+    # the single `gpu_type_id` is used. A6000 (48GB) is wild overkill for the
+    # ~6GB arctic-embed-l job, so a run can prefer cheaper/abundant cards.
+    gpu_type_ids: tuple[str, ...] = ()
     cloud_type: str = "COMMUNITY"
     container_disk_gb: int = 80
     allowed_cuda_versions: tuple[str, ...] = ("12.4", "12.5", "12.6", "12.7", "12.8")
@@ -43,7 +48,7 @@ def build_create_payload(cfg: CreatePodConfig) -> dict:
         "imageName": cfg.image_name,
         "cloudType": cfg.cloud_type,
         "computeType": "GPU",
-        "gpuTypeIds": [cfg.gpu_type_id],
+        "gpuTypeIds": list(cfg.gpu_type_ids) if cfg.gpu_type_ids else [cfg.gpu_type_id],
         "gpuCount": 1,
         "interruptible": False,
         "containerDiskInGb": cfg.container_disk_gb,
@@ -165,6 +170,9 @@ def main() -> None:
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--name", default=None)
     c.add_argument("--gpu", default="NVIDIA RTX A6000")
+    c.add_argument("--gpu-type-ids", default="",
+                   help="Comma-separated ordered preference list; overrides --gpu. "
+                        "RunPod picks the first type with capacity.")
     c.add_argument("--cloud-type", default="COMMUNITY", choices=["COMMUNITY", "SECURE"])
     sub.add_parser("list")
     for name in ("status", "wait-ready", "terminate"):
@@ -173,7 +181,13 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.cmd == "create":
-        cfg = CreatePodConfig(name=args.name or pod_name(), gpu_type_id=args.gpu, cloud_type=args.cloud_type)
+        gpu_type_ids = tuple(s.strip() for s in args.gpu_type_ids.split(",") if s.strip())
+        cfg = CreatePodConfig(
+            name=args.name or pod_name(),
+            gpu_type_id=args.gpu,
+            gpu_type_ids=gpu_type_ids,
+            cloud_type=args.cloud_type,
+        )
         out = create_pod(cfg, dry_run=args.dry_run)
         if out:
             print(json.dumps(out, indent=2))

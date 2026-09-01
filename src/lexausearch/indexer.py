@@ -20,6 +20,26 @@ from lexausearch.models import ActRecord, Chunk
 if TYPE_CHECKING:
     from lexausearch.cache import EmbedCache
 
+def _preload_onnxruntime_dlls() -> None:
+    """Load cuDNN 9 from the nvidia-cudnn-cu12 wheel.
+
+    onnxruntime-gpu only does this when preload runs and no `import torch`
+    preceded it. Nothing here imports torch, so without this call
+    CUDAExecutionProvider silently falls back to CPU on images lacking system
+    cuDNN 9 (RunPod stock pytorch image, 2026-09-02). Must run before fastembed
+    builds its first InferenceSession. No-op on a CPU-only build or where cuDNN
+    already resolves; the hard gate is scripts/_verify_gpu.py.
+    """
+    fn = getattr(onnxruntime, "preload_dlls", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+
+
+_preload_onnxruntime_dlls()
+
 DENSE_MODEL = "snowflake/snowflake-arctic-embed-l"
 SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"

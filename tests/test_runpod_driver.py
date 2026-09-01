@@ -31,6 +31,25 @@ def test_build_create_payload_honours_cloud_and_gpu_override():
     assert p["gpuTypeIds"] == ["NVIDIA RTX A5000"]
 
 
+def test_build_create_payload_sends_gpu_type_ids_list_verbatim():
+    cfg = rd.CreatePodConfig(
+        name="n",
+        gpu_type_id="NVIDIA RTX A6000",  # ignored when the list is set
+        gpu_type_ids=("NVIDIA RTX A5000", "NVIDIA GeForce RTX 3090", "NVIDIA RTX A6000"),
+    )
+    p = rd.build_create_payload(cfg)
+    assert p["gpuTypeIds"] == [
+        "NVIDIA RTX A5000",
+        "NVIDIA GeForce RTX 3090",
+        "NVIDIA RTX A6000",
+    ]
+
+
+def test_build_create_payload_falls_back_to_single_gpu_when_list_empty():
+    cfg = rd.CreatePodConfig(name="n", gpu_type_id="NVIDIA RTX A5000", gpu_type_ids=())
+    assert rd.build_create_payload(cfg)["gpuTypeIds"] == ["NVIDIA RTX A5000"]
+
+
 def test_pod_name_format():
     from datetime import datetime, timezone
     n = rd.pod_name(datetime(2026, 9, 1, 3, 4, 5, tzinfo=timezone.utc))

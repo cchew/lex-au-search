@@ -59,6 +59,7 @@ class RunPodBackend(IngestBackend):
         ssh_key: str,
         cloud_type: str = "COMMUNITY",
         gpu_type_id: str = "NVIDIA RTX A6000",
+        gpu_type_ids: tuple[str, ...] = (),
         assume_yes: bool = False,
         reuse_pod: bool = False,
         keep_pod: bool = False,
@@ -70,6 +71,7 @@ class RunPodBackend(IngestBackend):
         self.ssh_key = ssh_key
         self.cloud_type = cloud_type
         self.gpu_type_id = gpu_type_id
+        self.gpu_type_ids = tuple(gpu_type_ids)
         self.assume_yes = assume_yes
         self.reuse_pod = reuse_pod
         self.keep_pod = keep_pod
@@ -174,6 +176,7 @@ class RunPodBackend(IngestBackend):
             cfg = self._rd.CreatePodConfig(
                 name=self._rd.pod_name(),
                 gpu_type_id=self.gpu_type_id,
+                gpu_type_ids=self.gpu_type_ids,
                 cloud_type=self.cloud_type,
             )
             pod = self._rd.create_pod(cfg)
@@ -216,11 +219,12 @@ class RunPodBackend(IngestBackend):
         # 6d: no prior detached ingest job may still hold the GPU.
         self._ensure_gpu_idle()
 
-        # 6e: CUDA execution provider must be present.
-        self._ssh(
-            'python3 -c "import onnxruntime as o; assert '
-            "'CUDAExecutionProvider' in o.get_available_providers()\""
-        )
+        # 6e: onnxruntime must actually EXECUTE on CUDA, not merely be built
+        # with the provider. get_available_providers() lists build-time
+        # providers and passes even when a missing cuDNN 9 silently downgrades
+        # inference to CPU (2026-09-02). _verify_gpu.py forces a real CUDA
+        # session. Runs on the --reuse-pod path too, where 6c was skipped.
+        self._ssh(f"cd {REMOTE_DIR} && python3 scripts/_verify_gpu.py")
         print("[runpod] prepare complete", file=sys.stderr)
 
     # --------------------------------------------------------- prepare guts
@@ -262,13 +266,18 @@ class RunPodBackend(IngestBackend):
     def _cost_gate(self) -> None:
         rate = _APPROX_RATE_AUD_PER_HOUR.get(self.cloud_type, 0.85)
         est = rate * _APPROX_SHARD0_HOURS
+        card = (
+            " > ".join(self.gpu_type_ids) + "  (first available; estimate assumes priciest)"
+            if self.gpu_type_ids
+            else self.gpu_type_id
+        )
         print(
             "RunPod ingest cost gate\n"
             "-----------------------\n"
             "A leaked pod bills until you kill it. If this run is interrupted "
             "without a clean teardown, reap it with:\n"
             "  python scripts/run_sharded_ingest.py --backend runpod --reap\n"
-            f"  card:     {self.gpu_type_id}\n"
+            f"  card:     {card}\n"
             f"  cloud:    {self.cloud_type}\n"
             f"  rate:     ~AUD {rate:.2f}/hr (approx)\n"
             f"  estimate: ~AUD {est:.2f} for a ~{_APPROX_SHARD0_HOURS}h shard run",

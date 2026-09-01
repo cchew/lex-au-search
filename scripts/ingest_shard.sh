@@ -16,6 +16,11 @@ SHARD_INDEX="$1"
 SHARD_SIZE="$2"
 SEED_DB_PATH="${3:-}"
 
+# Fail fast if onnxruntime would run on CPU - a silent GPU->CPU fall-back
+# (missing cuDNN 9) turned a 2-Act smoke into an 18-minute CPU grind
+# (2026-09-02). Cheaper to abort here than 4-6h into a shard.
+python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_verify_gpu.py"
+
 # Download only index.json first, then only THIS shard's XML files - not
 # the whole ~3,078-Act corpus. Found running the real 5-Act smoke test
 # (2026-08-04): downloading the full corpus took 13+ minutes and hit HF
