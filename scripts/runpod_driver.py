@@ -70,3 +70,117 @@ def api_key() -> str:
         )
         sys.exit(2)
     return key
+
+
+def _request(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        API_BASE + path,
+        method=method,
+        headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
+        data=json.dumps(body).encode() if body is not None else None,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode()
+            return getattr(r, "status", 200), (json.loads(raw) if raw.strip() else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        return e.code, (json.loads(raw) if raw.strip() else {})
+
+
+def create_pod(cfg: CreatePodConfig, *, dry_run: bool = False) -> dict:
+    payload = build_create_payload(cfg)
+    if dry_run:
+        print(json.dumps(payload, indent=2))
+        return {}
+    status, resp = _request("POST", "/pods", payload)
+    if (
+        status == 500
+        and cfg.cloud_type == "COMMUNITY"
+        and "no instances currently available" in json.dumps(resp).lower()
+    ):
+        print("COMMUNITY has no instances; retrying on SECURE ...", file=sys.stderr)
+        status, resp = _request("POST", "/pods", {**payload, "cloudType": "SECURE"})
+    if status not in (200, 201):
+        raise RuntimeError(f"create pod failed ({status}): {resp}")
+    return resp
+
+
+def list_pods() -> list[dict]:
+    _, resp = _request("GET", "/pods")
+    return resp if isinstance(resp, list) else resp.get("pods", []) or []
+
+
+def get_status(pod_id: str) -> str:
+    status, resp = _request("GET", f"/pods/{pod_id}")
+    if status == 404:
+        return "TERMINATED"
+    return resp.get("desiredStatus", "UNKNOWN")
+
+
+def ssh_coords(pod_id: str) -> tuple[str, int] | None:
+    _, resp = _request("GET", f"/pods/{pod_id}")
+    ip = resp.get("publicIp") or ""
+    pm = resp.get("portMappings") or {}
+    port = pm.get("22") if isinstance(pm, dict) else None
+    if ip and port:
+        return ip, int(port)
+    return None
+
+
+def wait_ready(pod_id: str, *, timeout_s: int = 600, sleep=time.sleep, now=time.monotonic) -> tuple[str, int]:
+    start = now()
+    while now() - start < timeout_s:
+        coords = ssh_coords(pod_id)
+        if coords:
+            return coords
+        sleep(10)
+    raise TimeoutError(f"pod {pod_id} not SSH-ready after {timeout_s}s")
+
+
+def terminate_pod(pod_id: str, *, sleep=time.sleep) -> bool:
+    _request("DELETE", f"/pods/{pod_id}")
+    for i in range(3):
+        if get_status(pod_id) == "TERMINATED":
+            return True
+        if i < 2:
+            sleep(5)
+    print(
+        f"MANUAL ACTION: python scripts/runpod_driver.py terminate {pod_id}\n"
+        f"  https://www.runpod.io/console/pods",
+    )
+    return False
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("create")
+    c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--name", default=None)
+    c.add_argument("--gpu", default="NVIDIA RTX A6000")
+    c.add_argument("--cloud-type", default="COMMUNITY", choices=["COMMUNITY", "SECURE"])
+    sub.add_parser("list")
+    for name in ("status", "wait-ready", "terminate"):
+        sp = sub.add_parser(name)
+        sp.add_argument("pod_id")
+    args = ap.parse_args()
+
+    if args.cmd == "create":
+        cfg = CreatePodConfig(name=args.name or pod_name(), gpu_type_id=args.gpu, cloud_type=args.cloud_type)
+        out = create_pod(cfg, dry_run=args.dry_run)
+        if out:
+            print(json.dumps(out, indent=2))
+    elif args.cmd == "list":
+        print(json.dumps(list_pods(), indent=2))
+    elif args.cmd == "status":
+        print(get_status(args.pod_id))
+    elif args.cmd == "wait-ready":
+        ip, port = wait_ready(args.pod_id)
+        print(f"{ip} {port}")
+    elif args.cmd == "terminate":
+        sys.exit(0 if terminate_pod(args.pod_id) else 1)
+
+
+if __name__ == "__main__":
+    main()
