@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ COLLECTION_SECTIONS = "legislation_section"
 # 2026-08-31) - dropped to 16. The non-cache path (upsert_chunks) still
 # passes batch_size=32 to fastembed directly; only the cache-miss loop
 # here uses this smaller cap.
-_EMBED_BATCH_SIZE = 16
+_EMBED_BATCH_SIZE = int(os.environ.get("LEXAU_EMBED_BATCH_SIZE", "16"))
 
 _QUANT_CONFIG = ScalarQuantization(
     scalar=ScalarQuantizationConfig(
