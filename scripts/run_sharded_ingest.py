@@ -19,6 +19,8 @@ from math import ceil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import runpod_driver
+from _envload import load_env
 from backends import get_backend
 from backends.base import IngestBackend, checkpoint_cache_path, shard_paths
 
@@ -53,7 +55,20 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--shard-size", type=int, default=300)
     ap.add_argument("--shards-dir", type=Path, default=Path("./shards"))
     ap.add_argument("--backend", choices=["colab", "runpod"], default="colab")
-    ap.add_argument("--gpu", default="T4", help="Colab GPU type (ignored for --backend runpod)")
+    ap.add_argument("--gpu", default="T4",
+                    help="Colab GPU type (Colab backend only; ignored for --backend runpod)")
+    ap.add_argument("--reap", action="store_true",
+                    help="Terminate any leftover lexau- RunPod pods, clear the pod-id "
+                         "file, and exit without ingesting.")
+    ap.add_argument("--reuse-pod", action="store_true", dest="reuse_pod",
+                    help="Reuse an existing live pod recorded in .runpod_pod instead of "
+                         "refusing to run.")
+    ap.add_argument("--keep-pod", action="store_true", dest="keep_pod",
+                    help="Leave the RunPod pod running after ingest instead of terminating it.")
+    ap.add_argument("--yes", action="store_true",
+                    help="Skip interactive confirmation prompts (RunPod backend).")
+    ap.add_argument("--cloud-type", choices=["COMMUNITY", "SECURE"], default="COMMUNITY",
+                    dest="cloud_type", help="RunPod cloud tier to launch pods on.")
     ap.add_argument("--skip-shards", default="",
                     help="Comma-separated shard indices to leave untouched this run. "
                          "Skipped shards are not attempted, not counted as failed, and "
@@ -61,8 +76,17 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main() -> None:
-    args = _build_parser().parse_args()
+def main(argv=None) -> None:
+    args = _build_parser().parse_args(argv)
+    load_env(__file__)
+
+    if args.reap:
+        for pod in runpod_driver.list_pods():
+            if str(pod.get("name", "")).startswith("lexau-") and pod.get("desiredStatus") == "RUNNING":
+                print(f"reaping {pod['id']} ({pod['name']})", file=sys.stderr)
+                runpod_driver.terminate_pod(pod["id"])
+        (Path(args.shards_dir) / ".runpod_pod").unlink(missing_ok=True)
+        sys.exit(0)
 
     skip = {int(x) for x in args.skip_shards.split(",") if x.strip() != ""}
     total_shards = ceil(args.total_acts / args.shard_size)

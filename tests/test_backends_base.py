@@ -62,9 +62,13 @@ def test_get_backend_colab(tmp_path):
     assert be.shards_dir == tmp_path and be.gpu == "T4"
 
 
-def test_get_backend_runpod_not_yet_implemented(tmp_path):
-    with pytest.raises(NotImplementedError):
-        get_backend("runpod", _args(tmp_path))
+def test_get_backend_runpod_constructs(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNPOD_SSH_KEY", "~/.ssh/k")
+    args = types.SimpleNamespace(shards_dir=tmp_path, cloud_type="COMMUNITY",
+                                 yes=True, reuse_pod=False, keep_pod=False, gpu="T4")
+    be = get_backend("runpod", args)
+    from backends.runpod_backend import RunPodBackend
+    assert isinstance(be, RunPodBackend)
 
 
 def test_get_backend_unknown(tmp_path):

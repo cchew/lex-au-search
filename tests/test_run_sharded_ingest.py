@@ -1,5 +1,6 @@
 # tests/test_run_sharded_ingest.py
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -55,3 +56,30 @@ def test_backend_arg_defaults_to_colab():
     p = rsi._build_parser()
     ns = p.parse_args(["--total-acts", "10"])
     assert ns.backend == "colab"
+
+
+def test_new_runpod_flags_parse():
+    p = rsi._build_parser()
+    ns = p.parse_args(["--total-acts", "10", "--backend", "runpod",
+                       "--yes", "--keep-pod", "--reuse-pod", "--cloud-type", "SECURE"])
+    assert ns.backend == "runpod" and ns.yes and ns.keep_pod and ns.reuse_pod
+    assert ns.cloud_type == "SECURE"
+
+
+def test_reap_terminates_lexau_pods_and_clears_file(tmp_path, monkeypatch, capsys):
+    calls = {"terminated": []}
+    fake_rd = types.SimpleNamespace(
+        list_pods=lambda: [
+            {"id": "a", "name": "lexau-ingest-1", "desiredStatus": "RUNNING"},
+            {"id": "b", "name": "other", "desiredStatus": "RUNNING"},
+        ],
+        terminate_pod=lambda pid, **k: calls["terminated"].append(pid) or True,
+    )
+    monkeypatch.setattr(rsi, "runpod_driver", fake_rd, raising=False)
+    (tmp_path / ".runpod_pod").write_text("a")
+    with pytest.raises(SystemExit) as e:
+        rsi.main(["--total-acts", "10", "--backend", "runpod", "--reap",
+                  "--shards-dir", str(tmp_path)])
+    assert e.value.code == 0
+    assert calls["terminated"] == ["a"]
+    assert not (tmp_path / ".runpod_pod").exists()
