@@ -129,22 +129,23 @@ For faster full-corpus re-ingests, run sharded ingest on RunPod's GPU cloud inst
 
 **Environment:** `.env` needs `RUNPOD_API_KEY` (create at RunPod account > Settings > API Keys). For SSH access during or after the run, also set `RUNPOD_SSH_KEY` (default: `~/.ssh/id_ed25519`). Register your SSH public key in RunPod Settings > SSH Keys - there is no API for key registration, only dashboard access.
 
-**Full ingest:** Set `LEXAU_EMBED_BATCH_SIZE=16` to avoid CUDA OOM on large Acts:
+**Full ingest:** The RunPod backend pins the remote embedding batch size to 16 (the value that ran the earlier shards without CUDA OOM on the largest Acts); no configuration needed.
 
 ```bash
-export LEXAU_EMBED_BATCH_SIZE=16
 python scripts/run_sharded_ingest.py --total-acts 3076 --shard-size 300 --backend runpod --yes --keep-pod --skip-shards 1,2,3,4,5,6,7,8,9,10
 ```
 
-This reseeds shard 0 from its embedding-cache checkpoint. Omit `--skip-shards` for a full restart from shard 0.
+`--keep-pod` leaves the pod running after the run, so `--reuse-pod` can retry on the same instance if a shard fails. This reseeds shard 0 from its embedding-cache checkpoint. Omit `--skip-shards` for a full restart from shard 0.
 
 **Recovery:** If a shard fails mid-run, retry the same invocation with `--reuse-pod` and `--yes` to skip the pod create and rerun on the same instance. To clean up after a network blip or early exit, terminate any leaked pod and clear the pod-id cache file:
 
 ```bash
-python scripts/run_sharded_ingest.py --total-acts 1 --shard-size 1 --backend runpod --reap
+python scripts/run_sharded_ingest.py --total-acts 1 --shard-size 1 --backend runpod --reap --shards-dir /path/to/your/shards-dir
 ```
 
-**Constraints:** One RunPod run at a time (a flock enforces serialisation). Default GPU is A6000 SECURE-or-COMMUNITY (~AUD 0.33-0.53/hour); pass `--cloud-type SECURE` to force the SECURE tier.
+Use the same `--shards-dir` that the ingest run used (default `./shards/`); `--reap` clears `.runpod_pod` under that directory.
+
+**Constraints:** One RunPod run at a time (a flock enforces serialisation). Default is an A6000 on the COMMUNITY tier (~USD 0.33-0.53/hour); pass `--cloud-type SECURE` to force the SECURE tier.
 
 ---
 
