@@ -201,6 +201,67 @@ def test_ssh_unreachable_checks_status_and_does_not_terminate_within_bound(tmp_p
     assert (tmp_path / ".runpod_pod").exists()
 
 
+def test_scp_back_failure_on_success_path_returns_failed_result(tmp_path):
+    # Job finished 0 remotely, but pulling shard_storage.zip fails -> the run
+    # must degrade to a failed ShardResult, never raise out of run_shard.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if "cat" in s and "job.exitcode" in s:
+            return types.SimpleNamespace(returncode=0, stdout="0", stderr="")
+        if any("shard_storage.zip" in str(x) for x in cmd):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="scp: connection closed")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "download" in res.diagnosis.lower()
+    assert rd.terminated == []
+
+
+def test_seed_read_failure_returns_failed_result(tmp_path):
+    # A corrupt / non-sqlite local accumulator is a local fault, not an
+    # unreachable pod: fail this shard cleanly with a "seed read failed" message.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    seed = tmp_path / "seed.db"
+    seed.write_text("this is not a sqlite database")
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    res = be.run_shard(0, 300, seed_cache=seed)
+    assert res.ok is False
+    assert "seed read failed" in res.diagnosis.lower()
+    assert rd.terminated == []
+
+
+def test_poll_loop_ssh_drop_gives_up_at_deadline_without_terminating(tmp_path):
+    # Launch succeeds, then every poll-loop SSH call raises. get_status stays
+    # "RUNNING", so only the wall-clock bound (_deadline_s, pinned to 0.0) ends
+    # the wait. run_shard must not terminate the pod or clear .runpod_pod.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    state = {"launched": False}
+    def fake_run(cmd, **kw):
+        if any("setsid -w" in str(x) for x in cmd):
+            state["launched"] = True
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if state["launched"]:
+            raise RuntimeError("connection dropped mid-run")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    be._deadline_s = 0.0  # monotonic() >= 0.0 is always true -> give up first cycle
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "unreachable" in res.diagnosis.lower()
+    assert rd.terminated == []
+    assert (tmp_path / ".runpod_pod").exists()
+
+
 def test_teardown_is_idempotent_and_terminates_once(tmp_path):
     rd = _FakeRD()
     be = _prepared(tmp_path, rd)

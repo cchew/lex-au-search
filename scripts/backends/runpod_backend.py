@@ -342,6 +342,12 @@ class RunPodBackend(IngestBackend):
                 mismatch = self._upload_seed(work, seed_cache)
             except _SSH_ERRORS:
                 return self._give_up_unreachable(index, work, ckpt)
+            except sqlite3.Error as e:
+                # Corrupt / locked local accumulator - a local fault, not an
+                # unreachable pod. Fail this shard cleanly.
+                return ShardResult(
+                    index, False, None, None, f"seed read failed: {e}"
+                )
             if mismatch is not None:
                 return ShardResult(index, False, None, None, mismatch)
 
@@ -408,8 +414,20 @@ class RunPodBackend(IngestBackend):
             if rc == 0:
                 storage_zip, cache_zip = shard_paths(self.shards_dir, index)
                 self.shards_dir.mkdir(parents=True, exist_ok=True)
-                self._scp_back(f"{work}/shard_storage.zip", storage_zip)
-                self._scp_back(f"{work}/shard_cache.zip", cache_zip)
+                try:
+                    self._scp_back(f"{work}/shard_storage.zip", storage_zip)
+                    self._scp_back(f"{work}/shard_cache.zip", cache_zip)
+                except _SSH_ERRORS as e:
+                    # The job succeeded remotely but we could not pull the
+                    # outputs. One shard's failure must not crash the run;
+                    # the accumulator already holds the last snapshot.
+                    return ShardResult(
+                        index,
+                        False,
+                        None,
+                        None,
+                        f"failed to download shard outputs: {e}",
+                    )
                 return ShardResult(index, True, storage_zip, cache_zip, "")
 
             # Non-zero terminal: salvage whatever the cache reached, then report.
@@ -455,11 +473,13 @@ class RunPodBackend(IngestBackend):
         """Flatten the local accumulator, scp it up, and prove the remote copy
         has the same row count. Returns a diagnosis string on mismatch, else
         None."""
-        local_rows = (
-            sqlite3.connect(str(seed_cache))
-            .execute("SELECT COUNT(*) FROM embed_cache")
-            .fetchone()[0]
-        )
+        conn = sqlite3.connect(str(seed_cache))
+        try:
+            local_rows = conn.execute(
+                "SELECT COUNT(*) FROM embed_cache"
+            ).fetchone()[0]
+        finally:
+            conn.close()
         with tempfile.TemporaryDirectory() as td:
             flat = Path(td) / "seed_flat.db"
             src = sqlite3.connect(str(seed_cache))
