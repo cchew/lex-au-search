@@ -78,10 +78,13 @@ class RunPodBackend(IngestBackend):
         self._teardown_ran: bool = False
         self._lock_fh = None
         self._signalled: bool = False
-        self._cleanup_registered: bool = False
-        # Injectable seam (also used by Task 9); keeps the GPU-idle retry wait
-        # and the run_shard poll loop stubbable in tests.
+        self._atexit_registered: bool = False
+        self._signals_registered: bool = False
+        # Injectable seams (also used by Task 9); keep the GPU-idle retry wait,
+        # the run_shard poll loop, and process-global signal registration
+        # stubbable in tests.
         self._sleep = time.sleep
+        self._signal = signal.signal
 
     # ------------------------------------------------------------------ locks
     def _acquire_lock(self) -> None:
@@ -152,10 +155,12 @@ class RunPodBackend(IngestBackend):
             )
             pod = self._rd.create_pod(cfg)
             self._pod_id = pod["id"]
-            # The instant a pod id exists it is billable: persist it and wire
-            # up every cleanup path BEFORE any step below can raise.
+            # The instant a pod id exists it is billable. Register the atexit
+            # teardown hook FIRST, before the POD_FILE write, so a write failure
+            # (disk full / perms) still leaves a path to terminate the pod.
+            self._register_atexit()
             self.POD_FILE.write_text(f"{self._pod_id}\n")
-            self._register_cleanup()
+            self._register_signal_handlers()
             print(f"[runpod] created pod {self._pod_id}", file=sys.stderr)
 
         self._ip, self._port = self._rd.wait_ready(
@@ -199,6 +204,21 @@ class RunPodBackend(IngestBackend):
             if self.POD_FILE.exists()
             else None
         )
+        # A prior unclean exit leaves POD_FILE pointing at a still-RUNNING pod.
+        # Without --reuse-pod, letting prepare() continue would create a second
+        # pod and overwrite the id, leaking the first one until the next --reap.
+        if (
+            pod_file_id
+            and not self.reuse_pod
+            and self._rd.get_status(pod_file_id) == "RUNNING"
+        ):
+            sys.exit(
+                f"refusing to start: {self.POD_FILE} names pod {pod_file_id!r}, "
+                "which the RunPod API still reports as RUNNING (a prior run likely "
+                "exited uncleanly). Resume it with --reuse-pod, or terminate it and "
+                "clear the file with:\n"
+                "  python scripts/run_sharded_ingest.py --backend runpod --reap"
+            )
         for pod in self._rd.list_pods() or []:
             name = pod.get("name", "") or ""
             if not name.startswith("lexau-"):
@@ -240,12 +260,21 @@ class RunPodBackend(IngestBackend):
             sys.exit("cost gate: not confirmed; aborting.")
 
     def _register_cleanup(self) -> None:
-        if self._cleanup_registered:
+        self._register_atexit()
+        self._register_signal_handlers()
+
+    def _register_atexit(self) -> None:
+        if self._atexit_registered:
             return
-        self._cleanup_registered = True
+        self._atexit_registered = True
         atexit.register(self.teardown)
-        signal.signal(signal.SIGINT, self._on_signal)
-        signal.signal(signal.SIGTERM, self._on_signal)
+
+    def _register_signal_handlers(self) -> None:
+        if self._signals_registered:
+            return
+        self._signals_registered = True
+        self._signal(signal.SIGINT, self._on_signal)
+        self._signal(signal.SIGTERM, self._on_signal)
 
     def _on_signal(self, signum, frame) -> None:
         # Set a flag and exit with the conventional code so the orchestrator's

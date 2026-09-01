@@ -35,6 +35,9 @@ def _be(tmp_path, rd, **kw):
     kwargs.update(kw)
     be = RunPodBackend(tmp_path, **kwargs)
     be._ssh_runs = runs
+    # No-op the process-global signal registration seam so tests that reach
+    # prepare() step 4 do not leak SIGINT/SIGTERM handlers.
+    be._signal = lambda *a, **k: None
     return be
 
 
@@ -77,3 +80,26 @@ def test_flock_contention_exits(tmp_path):
     be2 = _be(tmp_path, rd)
     with pytest.raises(SystemExit):
         be2._acquire_lock()
+
+
+def test_prepare_refuses_matching_running_pod_without_reuse_flag(tmp_path):
+    # POD_FILE names a pod the API still reports RUNNING (prior unclean exit) and
+    # --reuse-pod was NOT passed -> refuse rather than create a second pod and
+    # overwrite the id (which would leak the first, billing).
+    rd = _FakeRD()
+    (tmp_path / ".runpod_pod").write_text("pod_leaked\n")
+    be = _be(tmp_path, rd)  # reuse_pod defaults False
+    with pytest.raises(SystemExit):
+        be.prepare()
+    assert rd.terminated == []  # preflight refuses; never touches the pod
+
+
+def test_prepare_reuses_matching_running_pod_with_reuse_flag(tmp_path, monkeypatch):
+    rd = _FakeRD()
+    rd.create_pod = lambda *a, **k: pytest.fail("create_pod must not run on the --reuse-pod path")
+    monkeypatch.setattr("backends.runpod_backend.atexit.register", lambda fn: None)
+    (tmp_path / ".runpod_pod").write_text("pod_leaked\n")
+    be = _be(tmp_path, rd, reuse_pod=True)
+    be.prepare()
+    assert be._pod_id == "pod_leaked"
+    assert (tmp_path / ".runpod_pod").read_text().strip() == "pod_leaked"
