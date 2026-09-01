@@ -123,6 +123,29 @@ lex-au-search ingest-delta --corpus-dir ../lex-au/repo/corpus/ --storage-dir ./q
 
 Changed and new Acts are re-chunked, re-embedded (through the same `--cache-path` embedding cache), and upserted one Act at a time - each Act's old points are deleted first, since points aren't otherwise content-addressed and a re-upsert without deleting first would leave stale duplicates. Unchanged Acts are skipped entirely: no chunking, no embedding, no Qdrant write. A zero-chunk Act (parses but yields no extractable content, e.g. a corpus regression) is skipped without deleting its existing index entry, and is reported in the final summary with a non-zero exit code rather than silently dropped. A single Act's chunking failure (malformed/missing XML) doesn't abort the run - it's logged, that Act's prior index entry is left untouched, and the remaining Acts still get processed; failures are listed in the summary with a non-zero exit code. The very first `ingest-delta` run against a `--storage-dir` built before this feature existed will treat every Act as changed (no baseline hash to compare against) - that's expected, one-time bootstrap behaviour, not a bug. Note that in this bootstrap case, deleting each Act is a full linear scan of the collection's payloads (local-mode `delete(Filter)` has no index for this), run twice per Act across ~3,078 Acts and ~500k points - a plausible hours-long run with peak RAM roughly doubling, since deleted slots aren't reclaimed from the in-memory vector array until the process restarts. If `ingest-delta` reports the *whole* corpus as changed, a fresh full `ingest` is very likely cheaper and safer than letting it churn through the whole corpus one Act at a time.
 
+### RunPod ingest backend
+
+For faster full-corpus re-ingests, run sharded ingest on RunPod's GPU cloud instead of Colab. Setup:
+
+**Environment:** `.env` needs `RUNPOD_API_KEY` (create at RunPod account > Settings > API Keys). For SSH access during or after the run, also set `RUNPOD_SSH_KEY` (default: `~/.ssh/id_ed25519`). Register your SSH public key in RunPod Settings > SSH Keys - there is no API for key registration, only dashboard access.
+
+**Full ingest:** Set `LEXAU_EMBED_BATCH_SIZE=16` to avoid CUDA OOM on large Acts:
+
+```bash
+export LEXAU_EMBED_BATCH_SIZE=16
+python scripts/run_sharded_ingest.py --total-acts 3076 --shard-size 300 --backend runpod --yes --keep-pod --skip-shards 1,2,3,4,5,6,7,8,9,10
+```
+
+This reseeds shard 0 from its embedding-cache checkpoint. Omit `--skip-shards` for a full restart from shard 0.
+
+**Recovery:** If a shard fails mid-run, retry the same invocation with `--reuse-pod` and `--yes` to skip the pod create and rerun on the same instance. To clean up after a network blip or early exit, terminate any leaked pod and clear the pod-id cache file:
+
+```bash
+python scripts/run_sharded_ingest.py --total-acts 1 --shard-size 1 --backend runpod --reap
+```
+
+**Constraints:** One RunPod run at a time (a flock enforces serialisation). Default GPU is A6000 SECURE-or-COMMUNITY (~AUD 0.33-0.53/hour); pass `--cloud-type SECURE` to force the SECURE tier.
+
 ---
 
 ## Quickstart
