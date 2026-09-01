@@ -63,6 +63,48 @@ def test_prepare_writes_pod_file_and_registers_cleanup_before_any_raise(tmp_path
         be.prepare()
     assert (tmp_path / ".runpod_pod").read_text().strip() == "pod_new"
     assert be.teardown in registered
+    # The pod is ours, so the registered teardown must actually terminate it.
+    assert be._owns_pod is True
+    be.teardown()
+    assert rd.terminated == ["pod_new"]
+
+
+def test_prepare_refusal_does_not_terminate_a_pod_we_did_not_create(tmp_path, monkeypatch):
+    # A cost-gate / preflight refusal unwinds into run_all's `finally` ->
+    # teardown(). A pre-existing .runpod_pod (e.g. a --keep-pod instance) must
+    # survive: this process never owned that pod.
+    rd = _FakeRD()
+    be = _be(tmp_path, rd, assume_yes=False)
+    (tmp_path / ".runpod_pod").write_text("pod_kept\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit):
+        be.prepare()
+    be.teardown()
+    assert be._owns_pod is False
+    assert rd.terminated == []
+    assert (tmp_path / ".runpod_pod").read_text().strip() == "pod_kept"
+
+
+def test_teardown_uses_in_memory_pod_id_when_pod_file_missing(tmp_path):
+    # A failed POD_FILE.write_text in prepare() must not make teardown a silent
+    # no-op on a live, billing pod.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    (tmp_path / ".runpod_pod").unlink()
+    be.teardown()
+    assert rd.terminated == ["pod_new"]
+
+
+def test_prepare_raises_when_create_pod_returns_no_id(tmp_path, monkeypatch):
+    rd = _FakeRD()
+    rd.create_pod = lambda *a, **k: {"desiredStatus": "RUNNING"}
+    monkeypatch.setattr("backends.runpod_backend.atexit.register", lambda fn: None)
+    be = _be(tmp_path, rd)
+    with pytest.raises(RuntimeError, match="no id"):
+        be.prepare()
+    assert be._owns_pod is False
+    be.teardown()
+    assert rd.terminated == []
 
 
 def test_cost_gate_aborts_when_not_yes_and_not_tty(tmp_path, monkeypatch):
@@ -108,10 +150,23 @@ def test_prepare_reuses_matching_running_pod_with_reuse_flag(tmp_path, monkeypat
 # --------------------------------------------------------------- Task 9 tests
 
 
+def _started(stdout=""):
+    """Default fake-run reply, with the post-launch `test -f job.log` probe
+    answered STARTED so run_shard proceeds into the poll loop."""
+    return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+def _is_start_probe(s) -> bool:
+    return "echo STARTED" in str(s)
+
+
 def _prepared(tmp_path, rd, **kw):
     be = _be(tmp_path, rd, **kw)
     be._pod_id = "pod_new"; be._ip = "1.2.3.4"; be._port = 22001
     be._lock_fh = open(tmp_path / ".lk", "w")
+    # _prepared stands in for a backend that already created its own pod, so
+    # teardown() is entitled to terminate it (see _owns_pod).
+    be._owns_pod = True
     # Task 9 deviation: the brief's verbatim _prepared omits this, which leaves
     # test_detached_launch_command_shape (no _sleep override of its own) doing a
     # real 30s time.sleep between its two scripted polls. A no-op sleep keeps
@@ -127,6 +182,8 @@ def test_detached_launch_command_shape(tmp_path):
     seq = {"n": 0}
     def fake_run(cmd, **kw):
         s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
         if "job.exitcode" in s and "cat" in s:
             seq["n"] += 1
             return types.SimpleNamespace(returncode=0, stdout=("" if seq["n"] < 2 else "0"), stderr="")
@@ -143,9 +200,95 @@ def test_detached_launch_command_shape(tmp_path):
     j = " ".join(launched["cmd"])
     assert "ssh -f" in j or ("-f" in launched["cmd"])
     assert "setsid -w" in j
-    assert "LEXAU_EMBED_BATCH_SIZE=16" in j
-    assert "( setsid -w bash ~/lex-au-search/scripts/ingest_shard.sh 0 300 " in j
+    assert "-o ControlPath=~/.ssh/cm-lexau-%r@%h:%p" in j
+    assert "( LEXAU_EMBED_BATCH_SIZE=16 setsid -w bash ~/lex-au-search/scripts/ingest_shard.sh 0 300 " in j
     assert "job.exitcode.tmp" in j and "mv " in j and "job.exitcode ) &" in j
+
+
+def test_detached_launch_string_is_valid_bash(tmp_path):
+    # `cd X && VAR=v ( ... ) &` is a bash parse error; the assignment has to sit
+    # inside the subshell. Guard the real string with `bash -n`.
+    import subprocess
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd, batch_size=16)
+    captured = {}
+    def cap(cmd, **kw):
+        s = cmd[-1] if isinstance(cmd[-1], str) else ""
+        if "setsid -w" in s:
+            captured["launch"] = s
+        if _is_start_probe(s):
+            return _started("STARTED")
+        if "nvidia-smi" in s:
+            return _started()  # GPU idle
+        # "0" answers `cat job.exitcode`, so the poll loop ends immediately.
+        return types.SimpleNamespace(returncode=0, stdout="0", stderr="")
+    be._run = cap
+    be._sleep = lambda *a, **k: None
+    be.run_shard(0, 300, seed_cache=None)
+    r = subprocess.run(
+        ["bash", "-n", "-c", captured["launch"]], capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_launch_without_job_log_fails_fast(tmp_path):
+    # `ssh -f` returns 0 the moment it backgrounds itself, so the only proof the
+    # detached job started is job.log existing shortly after.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("NOSTART")
+        if "cat" in str(s) and "job.exitcode" in str(s):
+            pytest.fail("must not enter the poll loop when the job never started")
+        return _started()
+    be._run = fake_run
+    be._sleep = lambda *a, **k: None
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "did not start" in res.diagnosis
+    assert rd.terminated == []
+
+
+def test_run_loop_gives_up_at_wall_clock_cap_without_terminating(tmp_path):
+    # SSH keeps working but job.exitcode never appears (wedged ingest). The
+    # RUN_MAX_S bound must end the wait; the pod is teardown()'s problem.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
+        return _started()  # exitcode always empty -> "still running" forever
+    be._run = fake_run
+    be._sleep = lambda *a, **k: None
+    be._run_deadline = 0.0  # monotonic() >= 0.0 -> cap hit on the first poll
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "wall-clock cap" in res.diagnosis
+    assert "18h" in res.diagnosis
+    assert rd.terminated == []
+    assert (tmp_path / ".runpod_pod").exists()
+
+
+def test_deadline_resets_between_shards(tmp_path):
+    # _deadline_s is per shard: shard 0's SSH blip must not pin the unreachable
+    # budget for shard 1.
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    be._deadline_s = 12345.0  # leftover from a previous shard
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
+        if "cat" in str(s) and "job.exitcode" in str(s):
+            return _started("0")
+        return _started()
+    be._run = fake_run
+    be._sleep = lambda *a, **k: None
+    be.run_shard(1, 300, seed_cache=None)
+    assert be._deadline_s is None  # reset on entry, never re-armed this shard
 
 
 def test_poll_treats_absent_or_empty_exitcode_as_running(tmp_path):
@@ -154,6 +297,8 @@ def test_poll_treats_absent_or_empty_exitcode_as_running(tmp_path):
     polls = ["", "", "0"]
     def fake_run(cmd, **kw):
         s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
         if "cat" in s and "job.exitcode" in s:
             return types.SimpleNamespace(returncode=0, stdout=polls.pop(0), stderr="")
         if "shard_storage.zip" in s or "shard_cache.zip" in s:
@@ -173,6 +318,8 @@ def test_nonzero_exitcode_pulls_final_snapshot_and_sets_diagnosis(tmp_path, monk
     monkeypatch.setattr("backends.runpod_backend.merge_cache_files", lambda srcs, target: merged.append(target))
     def fake_run(cmd, **kw):
         s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
         if "cat" in s and "job.exitcode" in s:
             return types.SimpleNamespace(returncode=0, stdout="1", stderr="")
         if "tail -n 200" in s:
@@ -193,7 +340,8 @@ def test_ssh_unreachable_checks_status_and_does_not_terminate_within_bound(tmp_p
         raise RuntimeError("network down")
     be._run = fake_run
     be._sleep = lambda *_: None
-    be._deadline_s = 0.0  # force the 25-min bound immediately for the test
+    # run_shard resets _deadline_s per shard, so pin it through the override seam.
+    be._deadline_override = 0.0  # force the 25-min bound immediately for the test
     res = be.run_shard(0, 300, seed_cache=None)
     assert res.ok is False
     assert "unreachable" in res.diagnosis.lower()
@@ -208,6 +356,8 @@ def test_scp_back_failure_on_success_path_returns_failed_result(tmp_path):
     be = _prepared(tmp_path, rd)
     def fake_run(cmd, **kw):
         s = cmd[-1]
+        if _is_start_probe(s):
+            return _started("STARTED")
         if "cat" in s and "job.exitcode" in s:
             return types.SimpleNamespace(returncode=0, stdout="0", stderr="")
         if any("shard_storage.zip" in str(x) for x in cmd):
@@ -254,7 +404,7 @@ def test_poll_loop_ssh_drop_gives_up_at_deadline_without_terminating(tmp_path):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     be._run = fake_run
     be._sleep = lambda *_: None
-    be._deadline_s = 0.0  # monotonic() >= 0.0 is always true -> give up first cycle
+    be._deadline_override = 0.0  # monotonic() >= 0.0 always true -> give up first cycle
     res = be.run_shard(0, 300, seed_cache=None)
     assert res.ok is False
     assert "unreachable" in res.diagnosis.lower()

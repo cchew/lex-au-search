@@ -83,3 +83,25 @@ def test_reap_terminates_lexau_pods_and_clears_file(tmp_path, monkeypatch, capsy
     assert e.value.code == 0
     assert calls["terminated"] == ["a"]
     assert not (tmp_path / ".runpod_pod").exists()
+
+
+def test_reap_does_not_require_total_acts(tmp_path, monkeypatch):
+    calls = {"terminated": []}
+    fake_rd = types.SimpleNamespace(
+        list_pods=lambda: [
+            {"id": "a", "name": "lexau-ingest-1", "desiredStatus": "RUNNING"},
+            {"name": "lexau-ingest-broken", "desiredStatus": "RUNNING"},  # no id
+        ],
+        terminate_pod=lambda pid, **k: calls["terminated"].append(pid) or True,
+    )
+    monkeypatch.setattr(rsi, "runpod_driver", fake_rd, raising=False)
+    with pytest.raises(SystemExit) as e:
+        rsi.main(["--backend", "runpod", "--reap", "--shards-dir", str(tmp_path)])
+    assert e.value.code == 0
+    assert calls["terminated"] == ["a"]  # the id-less pod is skipped, not crashed on
+
+
+def test_total_acts_still_required_without_reap(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        rsi.main(["--backend", "runpod", "--shards-dir", str(tmp_path)])
+    assert e.value.code == 2

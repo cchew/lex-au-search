@@ -140,7 +140,7 @@ python scripts/run_sharded_ingest.py --total-acts 3076 --shard-size 300 --backen
 **Recovery:** If a shard fails mid-run, retry the same invocation with `--reuse-pod` and `--yes` to skip the pod create and rerun on the same instance. To clean up after a network blip or early exit, terminate any leaked pod and clear the pod-id cache file:
 
 ```bash
-python scripts/run_sharded_ingest.py --total-acts 1 --shard-size 1 --backend runpod --reap --shards-dir /path/to/your/shards-dir
+python scripts/run_sharded_ingest.py --backend runpod --reap --shards-dir /path/to/your/shards-dir
 ```
 
 Use the same `--shards-dir` that the ingest run used (default `./shards/`); `--reap` clears `.runpod_pod` under that directory.

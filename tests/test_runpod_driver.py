@@ -54,7 +54,6 @@ def test_api_key_returns_from_env(monkeypatch):
 # --- Task 4: REST functions + CLI ------------------------------------------
 import io
 import json
-import types as _types
 
 
 class _Resp:
@@ -145,6 +144,24 @@ def test_get_status_reports_terminated_on_404(monkeypatch):
     err = urllib.error.HTTPError(rd.API_BASE + "/pods/p", 404, "gone", {}, io.BytesIO(b"{}"))
     _patch_http(monkeypatch, _FakeHTTP([err]))
     assert rd.get_status("p") == "TERMINATED"
+
+
+def test_request_swallows_urlerror_and_timeout(monkeypatch):
+    # A DNS blip or read timeout during the 10-minute wait_ready poll must not
+    # propagate out and abandon a pod that is already billing.
+    import socket
+    import urllib.error
+    fake = _FakeHTTP([
+        urllib.error.URLError("dns"),
+        socket.timeout("read timed out"),
+        urllib.error.URLError("dns"),
+        urllib.error.URLError("dns"),
+    ])
+    _patch_http(monkeypatch, fake)
+    assert rd._request("GET", "/pods/x") == (0, {})
+    assert rd._request("GET", "/pods/x") == (0, {})
+    assert rd.get_status("x") != "RUNNING"
+    assert rd.ssh_coords("x") is None
 
 
 def test_terminate_pod_confirms_deletion(monkeypatch):

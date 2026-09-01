@@ -45,7 +45,8 @@ WAIT_READY_TIMEOUT_S = 600
 DASHBOARD_SSH_KEYS_URL = "https://www.runpod.io/console/user/settings"
 DASHBOARD_PODS_URL = "https://www.runpod.io/console/pods"
 # Ballpark A6000 on-demand rate for the cost-gate estimate only (spike 2026-09-01:
-# COMMUNITY ~$0.33/hr, SECURE ~$0.53/hr). Not used for billing.
+# ~USD 0.33 / 0.53 per hour; the dict is the rough AUD-equivalent for the estimate
+# only). Not used for billing.
 _APPROX_RATE_AUD_PER_HOUR = {"COMMUNITY": 0.55, "SECURE": 0.85}
 _APPROX_SHARD0_HOURS = 6
 
@@ -84,9 +85,12 @@ class RunPodBackend(IngestBackend):
         self._port: int = 0
         self._teardown_ran: bool = False
         self._lock_fh = None
-        self._signalled: bool = False
         self._atexit_registered: bool = False
         self._signals_registered: bool = False
+        # True only once THIS process created (or explicitly adopted via
+        # --reuse-pod) the pod. teardown() refuses to terminate anything else,
+        # so a prepare()-time refusal cannot kill a pod we did not start.
+        self._owns_pod: bool = False
         # Injectable seams (also used by Task 9); keep the GPU-idle retry wait,
         # the run_shard poll loop, and process-global signal registration
         # stubbable in tests.
@@ -94,8 +98,14 @@ class RunPodBackend(IngestBackend):
         self._signal = signal.signal
         # Set lazily to `time.monotonic() + 1500` the first time run_shard's poll
         # loop hits an SSH failure; the wall-clock bound past which an
-        # unreachable pod is abandoned. Tests pin it to force the bound.
+        # unreachable pod is abandoned. Reset per shard from _deadline_override
+        # (normally None) so one shard's SSH blip cannot pin the budget for the
+        # whole run; tests set the override to 0.0 to force the bound.
         self._deadline_s: float | None = None
+        self._deadline_override: float | None = None
+        # Absolute wall-clock deadline for a single shard's poll loop. Computed
+        # per shard as monotonic() + RUN_MAX_S unless a test pins it here.
+        self._run_deadline: float | None = None
 
     # ------------------------------------------------------------------ locks
     def _acquire_lock(self) -> None:
@@ -117,6 +127,7 @@ class RunPodBackend(IngestBackend):
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ControlMaster=auto",
+            "-o", "ControlPath=~/.ssh/cm-lexau-%r@%h:%p",
             "-o", "ControlPersist=60s",
             "-i", os.path.expanduser(self.ssh_key),
             f"root@{self._ip}",
@@ -155,6 +166,7 @@ class RunPodBackend(IngestBackend):
             and self._rd.get_status(pod_file_id) == "RUNNING"
         ):
             self._pod_id = pod_file_id
+            self._owns_pod = True
             reusing = True
             print(f"[runpod] reusing pod {pod_file_id} (--reuse-pod)", file=sys.stderr)
             self._register_cleanup()
@@ -165,7 +177,10 @@ class RunPodBackend(IngestBackend):
                 cloud_type=self.cloud_type,
             )
             pod = self._rd.create_pod(cfg)
-            self._pod_id = pod["id"]
+            self._pod_id = pod.get("id")
+            if not self._pod_id:
+                raise RuntimeError(f"create_pod returned no id: {pod!r}")
+            self._owns_pod = True
             # The instant a pod id exists it is billable. Register the atexit
             # teardown hook FIRST, before the POD_FILE write, so a write failure
             # (disk full / perms) still leaves a path to terminate the pod.
@@ -288,9 +303,8 @@ class RunPodBackend(IngestBackend):
         self._signal(signal.SIGTERM, self._on_signal)
 
     def _on_signal(self, signum, frame) -> None:
-        # Set a flag and exit with the conventional code so the orchestrator's
-        # `finally` runs teardown() exactly once.
-        self._signalled = True
+        # Exit with the conventional code so the orchestrator's `finally` (and
+        # the atexit hook) runs teardown() exactly once.
         sys.exit(130 if signum == signal.SIGINT else 143)
 
     def _ensure_gpu_idle(self) -> None:
@@ -316,10 +330,23 @@ class RunPodBackend(IngestBackend):
     POLL_INTERVAL_S = 30
     CHECKPOINT_INTERVAL_POLLS = 10
     UNREACHABLE_BOUND_S = 1500  # 25 min wall-clock cap on SSH-unreachable retry
+    # 3x the ~6h shard-0 estimate. Bounds the *reachable* poll loop: if SSH keeps
+    # working but job.exitcode never appears (wedged ingest, hung HF download, a
+    # child OOM-killed before `echo $?`), the wait would otherwise be unbounded
+    # and bill indefinitely.
+    RUN_MAX_S = 18 * 3600
 
     def run_shard(
         self, index: int, shard_size: int, seed_cache: Path | None
     ) -> ShardResult:
+        # Per-shard reset: one shard's SSH blip must not pin the unreachable
+        # budget for the rest of the run. Tests pin _deadline_override.
+        self._deadline_s = self._deadline_override
+        run_deadline = (
+            self._run_deadline
+            if self._run_deadline is not None
+            else time.monotonic() + self.RUN_MAX_S
+        )
         work = f"~/lex-au-search/run/shard_{index:03d}"
         ckpt = checkpoint_cache_path(self.shards_dir, index)
 
@@ -357,9 +384,13 @@ class RunPodBackend(IngestBackend):
         # `( ... ) &` subshell so the job outlives the connection; `setsid -w`
         # so it survives the controlling terminal going away; the
         # `job.exitcode.tmp` + `mv` so a poll never reads a half-written code.
+        # The env assignment sits INSIDE the subshell, prefixing `setsid`: bash
+        # only accepts a `VAR=v` prefix before a simple command, so
+        # `cd X && VAR=v ( ... )` is a parse error.
         launch = (
-            f"cd {work} && LEXAU_EMBED_BATCH_SIZE={self.batch_size} "
-            f"( setsid -w bash ~/lex-au-search/scripts/ingest_shard.sh "
+            f"cd {work} && "
+            f"( LEXAU_EMBED_BATCH_SIZE={self.batch_size} "
+            f"setsid -w bash ~/lex-au-search/scripts/ingest_shard.sh "
             f"{index} {shard_size} {work}/shard_cache_seed.db "
             f">{work}/job.log 2>&1 ; echo $? >{work}/job.exitcode.tmp ; "
             f"mv {work}/job.exitcode.tmp {work}/job.exitcode ) &"
@@ -371,6 +402,7 @@ class RunPodBackend(IngestBackend):
                     "-o", "BatchMode=yes",
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
+                    "-o", "ControlPath=~/.ssh/cm-lexau-%r@%h:%p",
                     "-o", "ControlPersist=60s",
                     "-i", os.path.expanduser(self.ssh_key),
                     f"root@{self._ip}",
@@ -381,8 +413,24 @@ class RunPodBackend(IngestBackend):
                 stderr=subprocess.DEVNULL,
                 timeout=60,
             )
+            # `ssh -f` returns as soon as it backgrounds itself, so a rc of 0
+            # proves nothing about the remote job. Confirm the redirect target
+            # exists before committing to a multi-hour poll.
+            self._sleep(3)
+            started = self._ssh(
+                f"test -f {work}/job.log && echo STARTED || echo NOSTART",
+                check=False,
+            )
         except _SSH_ERRORS:
             return self._give_up_unreachable(index, work, ckpt)
+        if "STARTED" not in (getattr(started, "stdout", "") or ""):
+            return ShardResult(
+                index,
+                False,
+                None,
+                None,
+                "detached ingest job did not start (no job.log 3s after launch)",
+            )
 
         # --- Steps 3-5: poll to a terminal state ----------------------
         poll_count = 0
@@ -401,6 +449,19 @@ class RunPodBackend(IngestBackend):
                 poll_count += 1
                 if poll_count % self.CHECKPOINT_INTERVAL_POLLS == 0:
                     self._safe_snapshot(index, work, ckpt)
+                if time.monotonic() >= run_deadline:
+                    # Reachable but never terminal. Salvage the cache and hand
+                    # back a failed shard; the pod stays up for teardown to deal
+                    # with (run_shard never terminates).
+                    self._safe_snapshot(index, work, ckpt)
+                    return ShardResult(
+                        index,
+                        False,
+                        None,
+                        None,
+                        f"shard exceeded {self.RUN_MAX_S // 3600}h wall-clock "
+                        "cap; abandoning",
+                    )
                 self._sleep(self.POLL_INTERVAL_S)
                 continue
 
@@ -558,6 +619,7 @@ class RunPodBackend(IngestBackend):
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ControlMaster=auto",
+            "-o", "ControlPath=~/.ssh/cm-lexau-%r@%h:%p",
             "-o", "ControlPersist=60s",
             "-i", os.path.expanduser(self.ssh_key),
             "-P", str(self._port),
@@ -606,9 +668,21 @@ class RunPodBackend(IngestBackend):
                 pass
             self._lock_fh = None
 
-        if not self.POD_FILE.exists():
+        # A prepare()-time refusal (preflight orphan check, cost gate, matching-id
+        # guard) unwinds through run_all's `finally` into here. Without this guard
+        # it would read POD_FILE and terminate a pod this process never created -
+        # silently killing a --keep-pod instance on a retry that forgot
+        # --reuse-pod.
+        if not self._owns_pod:
             return
-        pod_id = self.POD_FILE.read_text().strip()
+
+        # Prefer the in-memory id: a failed POD_FILE.write_text in prepare() must
+        # not make teardown a silent no-op on a live, billing pod.
+        pod_id = self._pod_id or (
+            self.POD_FILE.read_text().strip() if self.POD_FILE.exists() else None
+        )
+        if not pod_id:
+            return
 
         if self.keep_pod:
             print(

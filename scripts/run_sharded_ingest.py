@@ -50,8 +50,9 @@ def run_all(
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--total-acts", type=int, required=True,
-                    help="Total Act count in the corpus (see lex-au/repo/corpus/index.json)")
+    ap.add_argument("--total-acts", type=int, default=None,
+                    help="Total Act count in the corpus (see lex-au/repo/corpus/index.json). "
+                         "Required unless --reap is given.")
     ap.add_argument("--shard-size", type=int, default=300)
     ap.add_argument("--shards-dir", type=Path, default=Path("./shards"))
     ap.add_argument("--backend", choices=["colab", "runpod"], default="colab")
@@ -59,7 +60,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Colab GPU type (Colab backend only; ignored for --backend runpod)")
     ap.add_argument("--reap", action="store_true",
                     help="Terminate any leftover lexau- RunPod pods, clear the pod-id "
-                         "file, and exit without ingesting.")
+                         "file, and exit without ingesting. Does not take the run lock - "
+                         "it will also terminate a concurrently running ingest's pod.")
     ap.add_argument("--reuse-pod", action="store_true", dest="reuse_pod",
                     help="Reuse an existing live pod recorded in .runpod_pod instead of "
                          "refusing to run.")
@@ -77,14 +79,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> None:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if not args.reap and args.total_acts is None:
+        parser.error("--total-acts is required unless --reap is given")
     load_env(__file__)
 
     if args.reap:
+        # NOTE: --reap does not take the run lock - it will also terminate a
+        # concurrently running ingest's pod.
         for pod in runpod_driver.list_pods():
-            if str(pod.get("name", "")).startswith("lexau-") and pod.get("desiredStatus") == "RUNNING":
-                print(f"reaping {pod['id']} ({pod['name']})", file=sys.stderr)
-                runpod_driver.terminate_pod(pod["id"])
+            pod_id = pod.get("id")
+            name = str(pod.get("name", "") or "")
+            if not pod_id:
+                continue
+            if name.startswith("lexau-") and pod.get("desiredStatus") == "RUNNING":
+                print(f"reaping {pod_id} ({name})", file=sys.stderr)
+                runpod_driver.terminate_pod(pod_id)
         (Path(args.shards_dir) / ".runpod_pod").unlink(missing_ok=True)
         sys.exit(0)
 

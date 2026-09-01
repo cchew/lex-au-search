@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -86,6 +87,11 @@ def _request(method: str, path: str, body: dict | None = None) -> tuple[int, dic
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         return e.code, (json.loads(raw) if raw.strip() else {})
+    except (urllib.error.URLError, socket.timeout, TimeoutError):
+        # A DNS blip or read timeout during the 10-minute wait_ready poll must
+        # not propagate out and abandon a pod that was just created and is
+        # already billing. Report "no answer" and let the caller retry.
+        return 0, {}
 
 
 def create_pod(cfg: CreatePodConfig, *, dry_run: bool = False) -> dict:
