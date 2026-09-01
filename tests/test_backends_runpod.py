@@ -103,3 +103,126 @@ def test_prepare_reuses_matching_running_pod_with_reuse_flag(tmp_path, monkeypat
     be.prepare()
     assert be._pod_id == "pod_leaked"
     assert (tmp_path / ".runpod_pod").read_text().strip() == "pod_leaked"
+
+
+# --------------------------------------------------------------- Task 9 tests
+
+
+def _prepared(tmp_path, rd, **kw):
+    be = _be(tmp_path, rd, **kw)
+    be._pod_id = "pod_new"; be._ip = "1.2.3.4"; be._port = 22001
+    be._lock_fh = open(tmp_path / ".lk", "w")
+    # Task 9 deviation: the brief's verbatim _prepared omits this, which leaves
+    # test_detached_launch_command_shape (no _sleep override of its own) doing a
+    # real 30s time.sleep between its two scripted polls. A no-op sleep keeps
+    # that test instant; the tests that need it also set it themselves.
+    be._sleep = lambda *a, **k: None
+    (tmp_path / ".runpod_pod").write_text("pod_new")
+    return be
+
+
+def test_detached_launch_command_shape(tmp_path):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd, batch_size=16)
+    seq = {"n": 0}
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if "job.exitcode" in s and "cat" in s:
+            seq["n"] += 1
+            return types.SimpleNamespace(returncode=0, stdout=("" if seq["n"] < 2 else "0"), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    launched = {}
+    orig = be._run
+    def capture(cmd, **kw):
+        if any("setsid -w" in str(x) for x in cmd):
+            launched["cmd"] = cmd
+        return orig(cmd, **kw)
+    be._run = capture
+    be.run_shard(0, 300, seed_cache=None)
+    j = " ".join(launched["cmd"])
+    assert "ssh -f" in j or ("-f" in launched["cmd"])
+    assert "setsid -w" in j
+    assert "LEXAU_EMBED_BATCH_SIZE=16" in j
+    assert "( setsid -w bash ~/lex-au-search/scripts/ingest_shard.sh 0 300 " in j
+    assert "job.exitcode.tmp" in j and "mv " in j and "job.exitcode ) &" in j
+
+
+def test_poll_treats_absent_or_empty_exitcode_as_running(tmp_path):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    polls = ["", "", "0"]
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if "cat" in s and "job.exitcode" in s:
+            return types.SimpleNamespace(returncode=0, stdout=polls.pop(0), stderr="")
+        if "shard_storage.zip" in s or "shard_cache.zip" in s:
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is True
+    assert polls == []  # all three polls consumed; empties were "running", not "failed"
+
+
+def test_nonzero_exitcode_pulls_final_snapshot_and_sets_diagnosis(tmp_path, monkeypatch):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    merged = []
+    monkeypatch.setattr("backends.runpod_backend.merge_cache_files", lambda srcs, target: merged.append(target))
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        if "cat" in s and "job.exitcode" in s:
+            return types.SimpleNamespace(returncode=0, stdout="1", stderr="")
+        if "tail -n 200" in s:
+            return types.SimpleNamespace(returncode=0, stdout="...boom...", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "boom" in res.diagnosis
+    assert merged and merged[-1] == checkpoint_cache_path(tmp_path, 0)
+
+
+def test_ssh_unreachable_checks_status_and_does_not_terminate_within_bound(tmp_path):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    def fake_run(cmd, **kw):
+        raise RuntimeError("network down")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    be._deadline_s = 0.0  # force the 25-min bound immediately for the test
+    res = be.run_shard(0, 300, seed_cache=None)
+    assert res.ok is False
+    assert "unreachable" in res.diagnosis.lower()
+    assert rd.terminated == []          # run_shard never terminates
+    assert (tmp_path / ".runpod_pod").exists()
+
+
+def test_teardown_is_idempotent_and_terminates_once(tmp_path):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    be.teardown()
+    be.teardown()
+    assert rd.terminated == ["pod_new"]
+    assert not (tmp_path / ".runpod_pod").exists()
+
+
+def test_teardown_raises_when_termination_unconfirmed(tmp_path):
+    rd = _FakeRD()
+    rd.terminate_pod = lambda pid, **k: False
+    be = _prepared(tmp_path, rd)
+    with pytest.raises(RuntimeError):
+        be.teardown()
+    assert (tmp_path / ".runpod_pod").exists()   # retained for the next --reap
+
+
+def test_keep_pod_leaves_pod_and_prints_reuse_hint(tmp_path, capsys):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd, keep_pod=True)
+    be.teardown()
+    assert rd.terminated == []
+    assert "--reuse-pod" in capsys.readouterr().out
+    assert (tmp_path / ".runpod_pod").exists()
