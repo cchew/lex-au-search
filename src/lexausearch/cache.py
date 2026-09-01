@@ -131,4 +131,5 @@ def merge_cache_files(shard_cache_paths: list[Path | str], output_cache_path: Pa
         )
         total_rows_read += len(rows)
     output._conn.commit()
+    output._conn.close()
     return total_rows_read
