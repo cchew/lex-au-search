@@ -376,8 +376,13 @@ class RunPodBackend(IngestBackend):
         if seed_cache is not None and seed_cache.exists():
             try:
                 mismatch = self._upload_seed(work, seed_cache)
-            except _SSH_ERRORS:
-                return self._give_up_unreachable(index, work, ckpt)
+            except _SSH_ERRORS as e:
+                # A failed seed upload is not an unreachable pod - don't route
+                # it through _give_up_unreachable (whose pre-ingest snapshot
+                # just logs a spurious "no such table: embed_cache").
+                return ShardResult(
+                    index, False, None, None, f"seed upload failed: {e}"
+                )
             except sqlite3.Error as e:
                 # Corrupt / locked local accumulator - a local fault, not an
                 # unreachable pod. Fail this shard cleanly.
@@ -625,46 +630,82 @@ class RunPodBackend(IngestBackend):
         return ShardResult(index, False, None, None, "pod/host unreachable")
 
     # --------------------------------------------------------- Task 9: scp
+    _SCP_ATTEMPTS = 3
+
     def _scp_base(self) -> list[str]:
-        # Same connection options as _ssh(), but scp spells the port `-P`.
+        # NOT the _ssh() options. Bulk transfers must NOT share the _ssh
+        # ControlMaster socket (opened with ControlPersist=60s for quick
+        # commands): a multi-hundred-MB copy over that channel can drop
+        # mid-stream and scp still exits 0, leaving a silently truncated file
+        # (observed: a 798MB seed landed as 48MB, rc=0). Force a dedicated
+        # connection per transfer and add keepalives so a dead link fails
+        # loudly in ~2min instead of hanging to the timeout.
         return [
             "scp",
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=~/.ssh/cm-lexau-%r@%h:%p",
-            "-o", "ControlPersist=60s",
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=8",
             "-i", os.path.expanduser(self.ssh_key),
             "-P", str(self._port),
         ]
 
+    def _remote_size(self, remote_path: str) -> int:
+        out = self._ssh_check(f"stat -c %s {remote_path} 2>/dev/null || echo -1")
+        try:
+            return int(out.split()[0])
+        except (ValueError, IndexError):
+            return -1
+
     def _scp_to(self, local: Path, remote_path: str) -> None:
-        res = self._run(
-            self._scp_base() + [str(local), f"root@{self._ip}:{remote_path}"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if getattr(res, "returncode", 0) != 0:
-            raise RuntimeError(
-                f"scp upload to {remote_path} failed (rc="
-                f"{getattr(res, 'returncode', '?')}): "
-                f"{getattr(res, 'stderr', '') or ''}"
+        want = local.stat().st_size
+        last = ""
+        for attempt in range(1, self._SCP_ATTEMPTS + 1):
+            res = self._run(
+                self._scp_base() + [str(local), f"root@{self._ip}:{remote_path}"],
+                capture_output=True,
+                text=True,
+                timeout=1800,
             )
+            rc = getattr(res, "returncode", 0)
+            got = self._remote_size(remote_path) if rc == 0 else -1
+            if rc == 0 and got == want:
+                return
+            last = (
+                f"rc={rc} local={want} remote={got} "
+                f"{getattr(res, 'stderr', '') or ''}".strip()
+            )
+            self._sleep(5)
+        raise RuntimeError(
+            f"scp upload to {remote_path} failed after {self._SCP_ATTEMPTS} "
+            f"attempts ({last})"
+        )
 
     def _scp_back(self, remote_path: str, local: Path) -> None:
-        res = self._run(
-            self._scp_base() + [f"root@{self._ip}:{remote_path}", str(local)],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if getattr(res, "returncode", 0) != 0:
-            raise RuntimeError(
-                f"scp download of {remote_path} failed (rc="
-                f"{getattr(res, 'returncode', '?')}): "
-                f"{getattr(res, 'stderr', '') or ''}"
+        want = self._remote_size(remote_path)
+        last = ""
+        for attempt in range(1, self._SCP_ATTEMPTS + 1):
+            res = self._run(
+                self._scp_base() + [f"root@{self._ip}:{remote_path}", str(local)],
+                capture_output=True,
+                text=True,
+                timeout=1800,
             )
+            rc = getattr(res, "returncode", 0)
+            got = local.stat().st_size if rc == 0 and local.exists() else -1
+            if rc == 0 and (want < 0 or got == want):
+                return
+            last = (
+                f"rc={rc} remote={want} local={got} "
+                f"{getattr(res, 'stderr', '') or ''}".strip()
+            )
+            self._sleep(5)
+        raise RuntimeError(
+            f"scp download of {remote_path} failed after {self._SCP_ATTEMPTS} "
+            f"attempts ({last})"
+        )
 
     # ------------------------------------------------------ Task 9: teardown
     def teardown(self) -> None:

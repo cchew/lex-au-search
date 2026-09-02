@@ -491,3 +491,78 @@ def test_snapshot_backup_cds_into_workdir_not_tilde_literal(tmp_path):
     assert "connect('snap.db')" in backup
     # no tilde-prefixed path inside the python -c literal
     assert "'~/" not in backup
+
+
+def test_scp_base_uses_a_dedicated_connection_not_the_ssh_controlmaster(tmp_path):
+    # Bulk transfers must not multiplex over the _ssh ControlMaster socket
+    # (ControlPersist=60s, meant for quick commands): a large copy over it can
+    # drop mid-stream and scp still exits 0. Each transfer gets its own
+    # connection + keepalives.
+    be = _be(tmp_path, _FakeRD())
+    base = " ".join(be._scp_base())
+    assert "ControlMaster=no" in base
+    assert "ControlPath=none" in base
+    assert "cm-lexau" not in base
+    assert "ServerAliveInterval=15" in base
+
+
+def _scp_probe_run(remote_size_by_attempt, *, scp_rc=0):
+    """fake _run that answers `stat -c %s` with the next size in the list and
+    every scp invocation with scp_rc."""
+    sizes = list(remote_size_by_attempt)
+    def fake_run(cmd, **kw):
+        if cmd and cmd[0] == "scp":
+            return types.SimpleNamespace(returncode=scp_rc, stdout="", stderr="boom")
+        if cmd and cmd[0] == "ssh" and str(cmd[-1]).startswith("stat -c %s"):
+            nxt = sizes.pop(0) if sizes else sizes_last[0]
+            return types.SimpleNamespace(returncode=0, stdout=f"{nxt}\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    sizes_last = [remote_size_by_attempt[-1]] if remote_size_by_attempt else [-1]
+    return fake_run
+
+
+def test_scp_to_retries_and_raises_on_persistent_truncation(tmp_path):
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 800)                       # want == 800
+    be._run = _scp_probe_run([48, 48, 48])             # remote always short
+    with pytest.raises(RuntimeError) as e:
+        be._scp_to(local, "~/w/shard_cache_seed.db")
+    msg = str(e.value)
+    assert "after 3 attempts" in msg
+    assert "local=800" in msg and "remote=48" in msg
+
+
+def test_scp_to_returns_once_remote_size_matches(tmp_path):
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 800)
+    calls = {"scp": 0}
+    def fake_run(cmd, **kw):
+        if cmd and cmd[0] == "scp":
+            calls["scp"] += 1
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd and cmd[0] == "ssh" and str(cmd[-1]).startswith("stat -c %s"):
+            size = 48 if calls["scp"] < 2 else 800    # short, then full
+            return types.SimpleNamespace(returncode=0, stdout=f"{size}\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._scp_to(local, "~/w/shard_cache_seed.db")        # must not raise
+    assert calls["scp"] == 2
+
+
+def test_seed_upload_ssh_failure_is_labelled_seed_upload_not_unreachable(tmp_path, monkeypatch):
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    be._sleep = lambda *_: None
+    seed = tmp_path / "seed.db"
+    import sqlite3 as _sq
+    c = _sq.connect(seed); c.execute("create table embed_cache(k text)"); c.commit(); c.close()
+    monkeypatch.setattr(be, "_upload_seed", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scp upload to X failed after 3 attempts (rc=0 local=800 remote=48)")))
+    res = be.run_shard(0, 300, seed_cache=seed)
+    assert res.ok is False
+    assert "seed upload failed" in res.diagnosis.lower()
+    assert "unreachable" not in res.diagnosis.lower()
+    assert rd.terminated == []
