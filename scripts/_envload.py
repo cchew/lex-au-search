@@ -18,5 +18,11 @@ def load_env(script_file: str | Path) -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
+        value = value.strip()
+        # Strip one layer of matching surrounding quotes so a value with spaces
+        # (e.g. RUNPOD_GPU_TYPE_IDS="NVIDIA RTX A5000,...") is also valid for a
+        # shell `set -a && source .env`.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
         if key and key not in os.environ:
-            os.environ[key] = os.path.expanduser(value.strip())
+            os.environ[key] = os.path.expanduser(value)

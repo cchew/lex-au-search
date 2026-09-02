@@ -39,3 +39,21 @@ def test_does_not_override_existing_env(tmp_path, monkeypatch):
 
 def test_missing_env_file_is_silent(tmp_path):
     load_env(tmp_path / "scripts" / "x.py")  # no .env anywhere; must not raise
+
+
+def test_strips_one_layer_of_matching_surrounding_quotes(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / ".env").write_text(
+        'RUNPOD_GPU_TYPE_IDS="NVIDIA RTX A5000,NVIDIA GeForce RTX 3090"\n'
+        "PLAIN=no_quotes\n"
+        "SINGLE='a b c'\n"
+    )
+    for k in ("RUNPOD_GPU_TYPE_IDS", "PLAIN", "SINGLE"):
+        monkeypatch.delenv(k, raising=False)
+
+    load_env(repo / "scripts" / "x.py")
+
+    assert os.environ["RUNPOD_GPU_TYPE_IDS"] == "NVIDIA RTX A5000,NVIDIA GeForce RTX 3090"
+    assert os.environ["PLAIN"] == "no_quotes"
+    assert os.environ["SINGLE"] == "a b c"
