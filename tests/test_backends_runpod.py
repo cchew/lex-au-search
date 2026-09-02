@@ -566,3 +566,85 @@ def test_seed_upload_ssh_failure_is_labelled_seed_upload_not_unreachable(tmp_pat
     assert "seed upload failed" in res.diagnosis.lower()
     assert "unreachable" not in res.diagnosis.lower()
     assert rd.terminated == []
+
+
+def test_rsync_up_command_shape(tmp_path):
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 500)
+    seen = []
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._remote_size = lambda *_: 500          # matches immediately
+    be._rsync_up(local, "~/w/shard_cache_seed.db")
+    rs = next(c for c in seen if c and c[0] == "rsync")
+    j = " ".join(rs)
+    assert "--partial" in rs and "--append" in rs and "--inplace" in rs
+    assert "--no-whole-file" in rs
+    assert any(x.startswith("--timeout=") for x in rs)
+    e_idx = rs.index("-e")
+    assert "ControlPath=none" in rs[e_idx + 1]
+    assert rs[-1].endswith(":~/w/shard_cache_seed.db")
+
+
+def test_rsync_up_loops_until_remote_size_reaches_local(tmp_path):
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 900)
+    be._run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    sizes = iter([300, 600, 900])
+    be._remote_size = lambda *_: next(sizes)
+    be._rsync_up(local, "~/w/seed.db")        # must return without raising
+
+
+def test_rsync_up_aborts_when_no_forward_progress(tmp_path):
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 900)
+    be._run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._remote_size = lambda *_: 128          # stuck, never grows
+    with pytest.raises(RuntimeError) as e:
+        be._rsync_up(local, "~/w/seed.db")
+    assert "no forward progress" in str(e.value)
+    assert "128/900" in str(e.value)
+
+
+def test_rsync_up_treats_a_timed_out_round_as_a_retry(tmp_path):
+    import subprocess as _sp
+    be = _prepared(tmp_path, _FakeRD())
+    be._sleep = lambda *_: None
+    local = tmp_path / "seed_flat.db"
+    local.write_bytes(b"x" * 400)
+    calls = {"n": 0}
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _sp.TimeoutExpired(cmd, 1)   # first round dies mid-transfer
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    sizes = iter([150, 400])
+    be._remote_size = lambda *_: next(sizes)
+    be._rsync_up(local, "~/w/seed.db")         # timeout is not fatal
+    assert calls["n"] == 2
+
+
+def test_upload_seed_uses_rsync_not_scp(tmp_path, monkeypatch):
+    import sqlite3 as _sq
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    seed = tmp_path / "seed.db"
+    c = _sq.connect(seed)
+    c.execute("create table embed_cache(k text)")
+    c.executemany("insert into embed_cache values (?)", [("a",), ("b",), ("c",)])
+    c.commit(); c.close()
+    used = {}
+    monkeypatch.setattr(be, "_rsync_up", lambda l, r: used.setdefault("rsync", (l, r)))
+    monkeypatch.setattr(be, "_scp_to", lambda *a, **k: (_ for _ in ()).throw(AssertionError("scp must not be used for the seed")))
+    monkeypatch.setattr(be, "_ssh_check", lambda *_: "3")   # remote row count
+    assert be._upload_seed("~/lex-au-search/run/shard_000", seed) is None
+    assert "rsync" in used

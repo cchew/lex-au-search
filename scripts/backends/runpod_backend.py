@@ -564,7 +564,9 @@ class RunPodBackend(IngestBackend):
             finally:
                 dst.close()
                 src.close()
-            self._scp_to(flat, f"{work}/shard_cache_seed.db")
+            # rsync-resume, not scp: the client uplink is CGNAT and a single
+            # stream never completes a ~760MB file (see _rsync_up).
+            self._rsync_up(flat, f"{work}/shard_cache_seed.db")
         remote = self._ssh_check(
             "python3 -c \"import sqlite3; print(sqlite3.connect('"
             f"{work}/shard_cache_seed.db')"
@@ -658,6 +660,60 @@ class RunPodBackend(IngestBackend):
             return int(out.split()[0])
         except (ValueError, IndexError):
             return -1
+
+    # --- large-file upload over a CGNAT/NAT64 client link -----------------
+    # A single sustained TCP stream to a RunPod pod does not survive a
+    # carrier-grade-NAT uplink: scp stalls at a random 9-48MB point (rc still
+    # 0), runpodctl/croc panics on a big socket write. rsync --partial
+    # --append is the only thing that gets a ~760MB seed across - it resumes
+    # from the last byte after each reset. Loop it until the remote size
+    # matches or forward progress stops.
+    _RSYNC_ITER_TIMEOUT_S = 120
+    _RSYNC_MAX_WALL_S = 3600
+    _RSYNC_NO_PROGRESS_LIMIT = 3
+
+    def _rsync_up(self, local: Path, remote_path: str) -> None:
+        want = local.stat().st_size
+        ssh_e = (
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+            "-o ControlMaster=no -o ControlPath=none "
+            "-o ServerAliveInterval=10 -o ServerAliveCountMax=6 "
+            f"-i {os.path.expanduser(self.ssh_key)} -p {self._port}"
+        )
+        deadline = time.monotonic() + self._RSYNC_MAX_WALL_S
+        last_size = -1
+        stalls = 0
+        while time.monotonic() < deadline:
+            try:
+                self._run(
+                    [
+                        "rsync", "--partial", "--inplace", "--append",
+                        "--no-whole-file",
+                        f"--timeout={self._RSYNC_ITER_TIMEOUT_S}",
+                        "-e", ssh_e,
+                        str(local), f"root@{self._ip}:{remote_path}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self._RSYNC_ITER_TIMEOUT_S + 30,
+                )
+            except subprocess.SubprocessError:
+                pass  # this round timed out/died; check progress and retry
+            got = self._remote_size(remote_path)
+            if got >= want:
+                return
+            stalls = stalls + 1 if got <= last_size else 0
+            last_size = got
+            if stalls >= self._RSYNC_NO_PROGRESS_LIMIT:
+                raise RuntimeError(
+                    f"rsync upload to {remote_path} stalled at {got}/{want} "
+                    f"bytes ({stalls} attempts with no forward progress)"
+                )
+            self._sleep(3)
+        raise RuntimeError(
+            f"rsync upload to {remote_path} did not finish within "
+            f"{self._RSYNC_MAX_WALL_S}s (reached {last_size}/{want})"
+        )
 
     def _scp_to(self, local: Path, remote_path: str) -> None:
         want = local.stat().st_size

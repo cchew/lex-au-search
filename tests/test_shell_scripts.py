@@ -21,13 +21,16 @@ def test_setup_gpu_env_has_the_env_level_steps():
     assert 'python3 -c "import onnxruntime' not in s
 
 
-def test_setup_gpu_env_installs_zip_binary():
-    # Stock RunPod images have no `zip`; ingest_shard.sh packages shard_storage/
-    # with it. Guarded by `command -v` so Colab (already has zip) skips the apt.
+def test_setup_gpu_env_installs_zip_and_rsync_binaries():
+    # Stock RunPod images have no `zip` or `rsync`. ingest_shard.sh packages
+    # shard_storage/ with zip; RunPodBackend._rsync_up needs rsync on the pod
+    # to receive the seed over a resumable transfer. Guarded by `command -v`
+    # so Colab (has both) skips the apt call.
     s = (SCRIPTS / "setup_gpu_env.sh").read_text()
     assert "apt-get install" in s
-    assert "zip" in s
     assert "command -v zip" in s
+    assert "command -v rsync" in s
+    assert "zip rsync" in s or ("install -y -qq zip" in s and "rsync" in s)
 
 
 def test_setup_gpu_env_does_no_per_shard_work():
