@@ -6,6 +6,11 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The stock RunPod image (runpod/pytorch:*-cuda12.4.1-*) ships no `zip`;
+# ingest_shard.sh needs it to package shard_storage/. Colab VMs already have
+# it, so `command -v` skips the apt call there.
+command -v zip >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq zip; }
+
 pip install -e ".[gpu]"
 
 # fastembed drags in CPU-only onnxruntime; swap it for a CUDA-12 build.

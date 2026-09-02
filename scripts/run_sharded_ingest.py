@@ -43,6 +43,11 @@ def run_all(
             seed = seed if seed.exists() else None
             result = backend.run_shard(i, shard_size, seed)
             results[i] = result.ok
+            if not result.ok:
+                print(
+                    f"[shard {i}] failed: {result.diagnosis or 'no diagnosis'}",
+                    file=sys.stderr,
+                )
     finally:
         backend.teardown()
     return results

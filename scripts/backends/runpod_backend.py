@@ -575,10 +575,14 @@ class RunPodBackend(IngestBackend):
     def _snapshot(self, index: int, work: str, ckpt: Path) -> None:
         """Consistent copy of the live remote cache -> fold into the local
         accumulator at `ckpt`. Raises on any SSH/scp failure."""
+        # `work` starts with `~`, which the shell expands for `cd` but Python's
+        # sqlite3.connect() does NOT - interpolating it into the -c literal
+        # writes snap.db to a literal ./~/... path and the scp-back then fails
+        # "No such file". cd in first, use relative names.
         self._ssh(
-            "python3 -c \"import sqlite3; sqlite3.connect('"
-            f"{work}/shard_cache.db')"
-            f".backup(sqlite3.connect('{work}/snap.db'))\"",
+            f"cd {work} && python3 -c \"import sqlite3; "
+            "sqlite3.connect('shard_cache.db')"
+            ".backup(sqlite3.connect('snap.db'))\"",
             check=False,
         )
         with tempfile.TemporaryDirectory() as td:

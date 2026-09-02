@@ -462,3 +462,32 @@ def test_keep_pod_leaves_pod_and_prints_reuse_hint(tmp_path, capsys):
     assert rd.terminated == []
     assert "--reuse-pod" in capsys.readouterr().out
     assert (tmp_path / ".runpod_pod").exists()
+
+
+def test_snapshot_backup_cds_into_workdir_not_tilde_literal(tmp_path):
+    # `work` is "~/lex-au-search/run/shard_000"; Python's sqlite3.connect() does
+    # not expand `~`. The backup command must `cd` into the workdir (shell
+    # expands it) and use relative db names, else snap.db lands at a literal
+    # ./~/... path and the scp-back fails "No such file".
+    rd = _FakeRD()
+    be = _prepared(tmp_path, rd)
+    seen = []
+    def fake_run(cmd, **kw):
+        s = cmd[-1]
+        seen.append(s)
+        if _is_start_probe(s):
+            return _started("STARTED")
+        if "cat" in s and "job.exitcode" in s:
+            return types.SimpleNamespace(returncode=0, stdout="1", stderr="")
+        if "tail -n 200" in s:
+            return types.SimpleNamespace(returncode=0, stdout="boom", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    be._run = fake_run
+    be._sleep = lambda *_: None
+    be.run_shard(0, 300, seed_cache=None)
+    backup = next(s for s in seen if "sqlite3" in s and "backup" in s)
+    assert backup.startswith("cd ~/lex-au-search/run/shard_000 &&")
+    assert "connect('shard_cache.db')" in backup
+    assert "connect('snap.db')" in backup
+    # no tilde-prefixed path inside the python -c literal
+    assert "'~/" not in backup
