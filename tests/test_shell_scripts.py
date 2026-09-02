@@ -9,12 +9,12 @@ SCRIPTS = ROOT / "scripts"
 def test_setup_gpu_env_has_the_env_level_steps():
     s = (SCRIPTS / "setup_gpu_env.sh").read_text()
     assert 'pip install -e ".[gpu]"' in s
-    # CUDA-12 onnxruntime + an explicit cuDNN 9 wheel (stock RunPod image has none).
-    assert "onnxruntime-gpu" in s
+    # CUDA-12 onnxruntime-gpu from the ADO feed (plain PyPI now ships CUDA-13),
+    # PLUS an explicit cuDNN 9 wheel (neither RunPod stock nor Colab reliably
+    # has it on onnxruntime's loader path).
+    assert "aiinfra.pkgs.visualstudio.com" in s
+    assert "onnxruntime-gpu==1.27.0" in s
     assert "nvidia-cudnn-cu12" in s
-    # The old CUDA-11 workaround feed and hard 1.27.0 pin are gone.
-    assert "aiinfra.pkgs.visualstudio.com" not in s
-    assert "onnxruntime-gpu==1.27.0" not in s
     # Validation is delegated to the shared real-CUDA probe, not an inline
     # python3 -c assert (get_available_providers() is a false green).
     assert "_verify_gpu.py" in s

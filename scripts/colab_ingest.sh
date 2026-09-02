@@ -12,11 +12,13 @@ pip install -e ".[gpu]"
 # fastembed pulls in plain CPU onnxruntime as a transitive dep, which then wins
 # the "onnxruntime" import namespace over the gpu extra's onnxruntime-gpu
 # (confirmed 2026-07-15: T4 attached and idle while ingest silently ran on CPU).
-# Reinstall the CUDA-12 build clean, and pin the cuDNN 9 wheel so preload_dlls()
-# (in _verify_gpu.py and lexausearch.indexer) can resolve it regardless of what
-# the runtime ships. Same setup as scripts/setup_gpu_env.sh.
+# The plain PyPI onnxruntime-gpu wheel now targets CUDA 13; Colab's T4 runtime
+# is CUDA 12, so pull the CUDA-12 build from Microsoft's ADO feed, and pin the
+# cuDNN 9 wheel so preload_dlls() (in _verify_gpu.py and lexausearch.indexer)
+# can resolve it. Same setup as scripts/setup_gpu_env.sh.
 pip uninstall -y onnxruntime onnxruntime-gpu
-pip install "onnxruntime-gpu>=1.20,<2" "nvidia-cudnn-cu12>=9,<10"
+pip install onnxruntime-gpu==1.27.0 --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+pip install "nvidia-cudnn-cu12>=9,<10"
 
 # Real GPU check - a silent CPU fall-back is invisible to
 # get_available_providers() (it lists build-time providers, not runtime loads).
