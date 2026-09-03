@@ -300,3 +300,42 @@ def test_push_412_retry_re_reads_head_and_bumps_generation(tmp_path, monkeypatch
     assert fake._create_commit_called == 2
     # Verify final commit succeeded
     assert len(fake.commits) == 1
+
+
+def test_mirror_pulls_when_hf_generation_ahead(tmp_path, monkeypatch):
+    hf_db = tmp_path / "hf.db"
+    _make_db(hf_db, 9)
+    sidecar = {"model_name": "m", "row_count": 9, "generation": 5,
+               "updated_at": "t", "sha256": _sha256(hf_db), "status": "partial"}
+    _wire_hf(monkeypatch, hf_db, sidecar)
+    shards = tmp_path / "shards"
+    shards.mkdir()
+
+    hf_cache.mirror_to_local(0, shards, token=None)
+
+    assert (shards / "shard_000_checkpoint_cache.db").exists()
+    marker = __import__("json").loads((shards / "shard_000.json").read_text())
+    assert marker["generation"] == 5
+
+
+def test_mirror_noop_when_local_current(tmp_path, monkeypatch):
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    (shards / "shard_000.json").write_text('{"generation": 5}')
+    (shards / "shard_000_checkpoint_cache.db").write_bytes(b"stale-but-current-gen")
+    sidecar = {"model_name": "m", "row_count": 1, "generation": 5,
+               "updated_at": "t", "sha256": "x", "status": "partial"}
+    monkeypatch.setattr(hf_cache, "_read_sidecar", lambda i, t: hf_cache.ShardCacheMeta(**sidecar))
+    called = []
+    monkeypatch.setattr(hf_cache, "_hf_download", lambda *a, **k: called.append(1))
+
+    hf_cache.mirror_to_local(0, shards, token=None)
+    assert not called  # no DB download
+
+
+def test_mirror_swallows_hf_errors(tmp_path, monkeypatch, capsys):
+    def _boom(*a, **k):
+        raise RuntimeError("hf down")
+    monkeypatch.setattr(hf_cache, "_read_sidecar", _boom)
+    hf_cache.mirror_to_local(0, tmp_path, token=None)  # must not raise
+    assert "mirror" in capsys.readouterr().err.lower()

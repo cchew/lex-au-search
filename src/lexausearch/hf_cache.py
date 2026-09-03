@@ -267,3 +267,52 @@ def push_shard_cache(shard_index: int, local_db: Path, *, model_name: str,
                     continue
                 raise
         return meta
+
+
+_GITATTRIBUTES = (
+    "*_checkpoint_cache.db filter=lfs diff=lfs merge=lfs -text\n"
+    "embed_cache.db filter=lfs diff=lfs merge=lfs -text\n"
+)
+
+
+def _local_marker_generation(shards_dir: Path, shard_index: int) -> int:
+    p = shards_dir / _shard_json_name(shard_index)
+    if not p.is_file():
+        return -1
+    try:
+        return int(json.loads(p.read_text()).get("generation", -1))
+    except (ValueError, json.JSONDecodeError):
+        return -1
+
+
+def mirror_to_local(shard_index: int, shards_dir: Path, *, token: str | None) -> None:
+    shards_dir = Path(shards_dir)
+    try:
+        meta = _read_sidecar(shard_index, token)
+        if meta is None:
+            return
+        if meta.generation <= _local_marker_generation(shards_dir, shard_index):
+            return
+        db_src = Path(_hf_download(HF_CACHE_REPO, _shard_db_name(shard_index), token))
+        shards_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(db_src, shards_dir / _shard_db_name(shard_index))
+        _write_sidecar(shards_dir / _shard_json_name(shard_index), meta)
+    except Exception as e:  # noqa: BLE001 - mirror is best-effort
+        print(f"[hf_cache] mirror of shard {shard_index} failed (non-fatal): {e}",
+              file=sys.stderr)
+
+
+def create_cache_repo(*, token: str) -> None:
+    api = _api()
+    api.create_repo(repo_id=HF_CACHE_REPO, repo_type="dataset", exist_ok=True, token=token)
+    try:
+        _hf_download(HF_CACHE_REPO, ".gitattributes", token)
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        with tempfile.TemporaryDirectory() as td:
+            ga = Path(td) / ".gitattributes"
+            ga.write_text(_GITATTRIBUTES)
+            api.upload_file(
+                path_or_fileobj=str(ga), path_in_repo=".gitattributes",
+                repo_id=HF_CACHE_REPO, repo_type="dataset", token=token,
+                commit_message="add .gitattributes (LFS patterns)",
+            )
