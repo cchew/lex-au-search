@@ -1,4 +1,5 @@
 import pytest
+from lexausearch import models
 from lexausearch.models import (
     Chunk, ActRecord, ActSearchResult, SearchResult, format_results
 )
@@ -125,3 +126,29 @@ def test_format_results_no_refs_no_refs_line():
     results = [SearchResult(chunk=_chunk(refs=[]), score=0.8)]
     output = format_results(results)
     assert "Refs:" not in output
+
+
+def test_dense_model_constant():
+    assert models.DENSE_MODEL == "snowflake/snowflake-arctic-embed-l"
+
+
+def test_sparse_model_constant():
+    assert models.SPARSE_MODEL == "Qdrant/bm25"
+
+
+def test_models_module_has_no_heavy_imports():
+    # models.py must stay importable without onnxruntime / qdrant_client so the
+    # orchestrator can import DENSE_MODEL cheaply.
+    import ast
+    import sys
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parent.parent / "src" / "lexausearch" / "models.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "onnxruntime" not in imported
+    assert "qdrant_client" not in imported

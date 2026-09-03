@@ -15,7 +15,7 @@ from qdrant_client.models import (
     PayloadSchemaType,
 )
 
-from lexausearch.models import ActRecord, Chunk
+from lexausearch.models import ActRecord, Chunk, DENSE_MODEL, SPARSE_MODEL  # noqa: F401  (re-export for existing importers)
 
 if TYPE_CHECKING:
     from lexausearch.cache import EmbedCache
@@ -40,8 +40,6 @@ def _preload_onnxruntime_dlls() -> None:
 
 _preload_onnxruntime_dlls()
 
-DENSE_MODEL = "snowflake/snowflake-arctic-embed-l"
-SPARSE_MODEL = "Qdrant/bm25"
 COLLECTION_ACTS = "legislation"
 COLLECTION_SECTIONS = "legislation_section"
 

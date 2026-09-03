@@ -1,6 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+DENSE_MODEL = "snowflake/snowflake-arctic-embed-l"
+SPARSE_MODEL = "Qdrant/bm25"
+
 
 @dataclass
 class Chunk:
