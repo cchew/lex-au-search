@@ -201,9 +201,13 @@ def ingest_shard(
     help="Comma-separated list of shard-local Qdrant storage directories to merge",
 )
 @click.option(
-    "--shard-cache-paths", required=True,
+    "--shard-cache-paths", required=False, default=None,
     help="Comma-separated list of shard-local embed_cache.db files to merge",
 )
+@click.option("--from-hf", is_flag=True, default=False,
+              help="Source shard caches from the HF cache repo instead of --shard-cache-paths")
+@click.option("--push-hf", is_flag=True, default=False,
+              help="Push the merged master embed_cache.db + catalogue.json back to the HF cache repo")
 @click.option(
     "--output-storage-dir", required=True, type=click.Path(path_type=Path),
     help="Path for the final merged Qdrant storage directory",
@@ -213,14 +217,54 @@ def ingest_shard(
     help="Path for the final merged embedding cache",
 )
 def merge_shards_cmd(
-    shard_storage_dirs: str, shard_cache_paths: str, output_storage_dir: Path, output_cache_path: Path
+    shard_storage_dirs: str, shard_cache_paths: str | None, from_hf: bool, push_hf: bool,
+    output_storage_dir: Path, output_cache_path: Path
 ) -> None:
     """Merge all completed shards' local storage + cache into one final
     qdrant_storage/ + embed_cache.db (same shape serve/mcp already expect).
     Runs entirely on CPU - no GPU needed, this only copies existing points
     and cached vectors, it never re-embeds."""
+    if bool(from_hf) == bool(shard_cache_paths):
+        raise click.UsageError("exactly one of --from-hf / --shard-cache-paths is required")
+
+    from lexausearch import hf_cache
+    from lexausearch.models import DENSE_MODEL
+    import tempfile, json as _json
+
+    if from_hf:
+        cat = hf_cache.read_catalogue(token=None)
+        if cat is None:
+            raise click.ClickException("--from-hf: no catalogue.json in the HF repo")
+        n = -(-cat.total_acts // cat.shard_size)  # ceil
+        tmp = Path(tempfile.mkdtemp(prefix="mergeshards-hf-"))
+        cache_paths = []
+        sidecars = {}
+        for i in range(n):
+            meta = hf_cache.fetch_shard_cache(i, tmp, token=None,
+                                              seed_as=f"shard_{i:03d}_checkpoint_cache.db")
+            if meta is None:
+                raise click.ClickException(f"--from-hf: shard {i} missing from the HF repo")
+            cache_paths.append(tmp / f"shard_{i:03d}_checkpoint_cache.db")
+            sidecars[i] = meta.model_name
+        expected_model = cat.dense_model
+    else:
+        cache_paths = [Path(p.strip()) for p in shard_cache_paths.split(",")]
+        sidecars = {}
+        for idx, p in enumerate(cache_paths):
+            sc = p.parent / f"{p.stem.replace('_checkpoint_cache', '')}.json"
+            if sc.is_file():
+                sidecars[idx] = _json.loads(sc.read_text())["model_name"]
+        expected_model = DENSE_MODEL
+
+    if len(sidecars) == len(cache_paths) and sidecars:  # all present -> guard active
+        bad = [i for i, m in sidecars.items() if m != expected_model]
+        if bad:
+            raise click.ClickException(
+                f"refusing to merge: shards {bad} built with a model other than "
+                f"{expected_model!r}. Re-run those shards under {expected_model!r}."
+            )
+
     storage_dirs = [Path(p.strip()) for p in shard_storage_dirs.split(",")]
-    cache_paths = [Path(p.strip()) for p in shard_cache_paths.split(",")]
 
     click.echo(f"Merging {len(storage_dirs)} shard(s) into {output_storage_dir} ...")
     shard_clients = [QdrantClient(path=str(d)) for d in storage_dirs]
@@ -233,6 +277,29 @@ def merge_shards_cmd(
     click.echo(f"  {rows} cache rows merged (deduplicated by content-addressed key).")
 
     click.echo("Done.")
+
+    if push_hf:
+        import os
+        from huggingface_hub import CommitOperationAdd
+        token = os.environ.get("HF_CACHE_WRITE_TOKEN") or hf_cache._resolve_token(None, None)
+        if not token:
+            raise click.ClickException("--push-hf needs HF_CACHE_WRITE_TOKEN")
+        cat = hf_cache.read_catalogue(token=token) or hf_cache.Catalogue(DENSE_MODEL, 300, 0, {})
+        new_master = {"row_count": hf_cache._row_count(output_cache_path),
+                      "generation": cat.master.get("generation", 0) + 1,
+                      "updated_at": hf_cache._now()}
+        with tempfile.TemporaryDirectory() as td:
+            cj = Path(td) / "catalogue.json"
+            cj.write_text(_json.dumps({"dense_model": cat.dense_model, "shard_size": cat.shard_size,
+                                       "total_acts": cat.total_acts, "master": new_master}, indent=2))
+            hf_cache._api().create_commit(
+                repo_id=hf_cache.HF_CACHE_REPO, repo_type="dataset",
+                operations=[
+                    CommitOperationAdd("embed_cache.db", str(output_cache_path)),
+                    CommitOperationAdd("catalogue.json", str(cj)),
+                ],
+                commit_message=f"master: gen {new_master['generation']}", token=token)
+        click.echo(f"Pushed master to HF ({new_master['row_count']} rows, gen {new_master['generation']}).")
 
 
 @cli.command(name="ingest-delta")

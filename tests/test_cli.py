@@ -453,3 +453,34 @@ def test_merge_shards_combines_two_local_shard_storages(tmp_path):
     points = merged_client.scroll(collection_name=COLLECTION_ACTS, limit=10, with_payload=True)[0]
     act_names = {p.payload["act_name"] for p in points}
     assert act_names == {"Privacy Act 1988", "Crimes Act 1914"}
+
+
+def test_merge_shards_requires_exactly_one_cache_source(tmp_path):
+    from click.testing import CliRunner
+    from lexausearch.cli import cli
+    r = CliRunner().invoke(cli, ["merge-shards",
+        "--shard-storage-dirs", str(tmp_path / "s0"),
+        "--output-storage-dir", str(tmp_path / "out"),
+        "--output-cache-path", str(tmp_path / "out.db")])
+    assert r.exit_code != 0
+    assert "exactly one of --from-hf" in r.output.lower()
+
+
+def test_merge_shards_mixed_model_guard_refuses(tmp_path, monkeypatch):
+    # two local caches, each with a sidecar naming a different model
+    import json, sqlite3
+    from click.testing import CliRunner
+    from lexausearch.cli import cli
+    for i, model in [(0, "model-a"), (1, "model-b")]:
+        db = tmp_path / f"shard_{i:03d}_checkpoint_cache.db"
+        c = sqlite3.connect(str(db)); c.execute("CREATE TABLE embed_cache (id TEXT PRIMARY KEY, vector BLOB NOT NULL)"); c.commit(); c.close()
+        (tmp_path / f"shard_{i:03d}.json").write_text(json.dumps({"model_name": model,
+            "row_count": 0, "generation": 1, "updated_at": "t", "sha256": "x", "status": "partial"}))
+    (tmp_path / "s0").mkdir(); (tmp_path / "s1").mkdir()
+    r = CliRunner().invoke(cli, ["merge-shards",
+        "--shard-storage-dirs", f"{tmp_path/'s0'},{tmp_path/'s1'}",
+        "--shard-cache-paths", f"{tmp_path/'shard_000_checkpoint_cache.db'},{tmp_path/'shard_001_checkpoint_cache.db'}",
+        "--output-storage-dir", str(tmp_path / "out"),
+        "--output-cache-path", str(tmp_path / "out.db")])
+    assert r.exit_code != 0
+    assert "refusing to merge" in r.output.lower()
