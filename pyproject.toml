@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.30",
     "mcp>=1.0",
     "click>=8.1",
+    "huggingface_hub>=0.24",
 ]
 
 [project.scripts]
@@ -36,7 +37,7 @@ dev = [
 gpu = [
     "onnxruntime-gpu>=1.20,<2",
     "nvidia-cudnn-cu12>=9,<10",
-    "huggingface_hub>=0.20",
+    "huggingface_hub>=0.24",
 ]
 
 [tool.pytest.ini_options]
