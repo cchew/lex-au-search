@@ -316,3 +316,65 @@ def create_cache_repo(*, token: str) -> None:
                 repo_id=HF_CACHE_REPO, repo_type="dataset", token=token,
                 commit_message="add .gitattributes (LFS patterns)",
             )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="python -m lexausearch.hf_cache")
+    sub = ap.add_subparsers(dest="verb", required=True)
+
+    f = sub.add_parser("fetch")
+    f.add_argument("index", type=int)
+    f.add_argument("--dest", required=True)
+    f.add_argument("--seed-as", default=None)
+    f.add_argument("--expect-model", default=None)
+    f.add_argument("--token", default=None)
+    f.add_argument("--token-file", default=None)
+
+    p = sub.add_parser("push")
+    p.add_argument("index", type=int)
+    p.add_argument("--db", required=True)
+    p.add_argument("--status", choices=["partial", "complete"], required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--token", default=None)
+    p.add_argument("--token-file", default=None)
+    return ap
+
+
+def main(argv=None) -> int:
+    args = _build_parser().parse_args(argv)
+    token = _resolve_token(args.token, args.token_file)
+    if args.verb == "fetch":
+        try:
+            meta = fetch_shard_cache(args.index, Path(args.dest), token=token,
+                                     expect_model=args.expect_model, seed_as=args.seed_as)
+            print("cold start (no HF cache)" if meta is None
+                  else f"fetched shard {args.index} gen {meta.generation} ({meta.row_count} rows)")
+            return 0
+        except HfCacheModelMismatch as e:
+            print(f"MODEL MISMATCH: {e}", file=sys.stderr)
+            return 4
+        except HfCacheCorrupt as e:
+            print(f"CORRUPT: {e}", file=sys.stderr)
+            return 5
+        except Exception as e:  # noqa: BLE001
+            print(f"fetch failed: {e}", file=sys.stderr)
+            return 1
+    # push
+    try:
+        meta = push_shard_cache(args.index, Path(args.db), model_name=args.model,
+                                status=args.status, token=token,
+                                overwrite=args.overwrite, live=args.live)
+        print(f"pushed shard {args.index} gen {meta.generation} ({meta.row_count} rows)")
+        return 0
+    except HfCacheModelMismatch as e:
+        print(f"HEAD MODEL MISMATCH: {e}", file=sys.stderr)
+        return 4
+    except Exception as e:  # noqa: BLE001
+        print(f"push failed: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -339,3 +339,56 @@ def test_mirror_swallows_hf_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hf_cache, "_read_sidecar", _boom)
     hf_cache.mirror_to_local(0, tmp_path, token=None)  # must not raise
     assert "mirror" in capsys.readouterr().err.lower()
+
+
+def test_cli_fetch_exit_0_on_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache",
+                        lambda *a, **k: hf_cache.ShardCacheMeta("m", 5, 1, "t", "x", "partial"))
+    rc = hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--seed-as", "s.db"])
+    assert rc == 0
+
+
+def test_cli_fetch_exit_0_on_cold(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", lambda *a, **k: None)
+    assert hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--seed-as", "s.db"]) == 0
+
+
+def test_cli_fetch_exit_4_on_model_mismatch(tmp_path, monkeypatch):
+    def _mm(*a, **k):
+        raise hf_cache.HfCacheModelMismatch("nope")
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", _mm)
+    assert hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--seed-as", "s.db",
+                          "--expect-model", "new"]) == 4
+
+
+def test_cli_fetch_exit_5_on_corrupt(tmp_path, monkeypatch):
+    def _c(*a, **k):
+        raise hf_cache.HfCacheCorrupt("bad")
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", _c)
+    assert hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--seed-as", "s.db"]) == 5
+
+
+def test_cli_fetch_exit_1_on_other(tmp_path, monkeypatch):
+    def _e(*a, **k):
+        raise RuntimeError("network")
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", _e)
+    assert hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--seed-as", "s.db"]) == 1
+
+
+def test_cli_push_exit_0(tmp_path, monkeypatch):
+    (tmp_path / "c.db").write_bytes(b"x")
+    monkeypatch.setattr(hf_cache, "push_shard_cache",
+                        lambda *a, **k: hf_cache.ShardCacheMeta("m", 1, 2, "t", "x", "partial"))
+    rc = hf_cache.main(["push", "0", "--db", str(tmp_path / "c.db"),
+                        "--status", "partial", "--model", "m", "--token", "t"])
+    assert rc == 0
+
+
+def test_cli_push_exit_4_on_head_mismatch(tmp_path, monkeypatch):
+    (tmp_path / "c.db").write_bytes(b"x")
+    def _mm(*a, **k):
+        raise hf_cache.HfCacheModelMismatch("head differs")
+    monkeypatch.setattr(hf_cache, "push_shard_cache", _mm)
+    rc = hf_cache.main(["push", "0", "--db", str(tmp_path / "c.db"),
+                        "--status", "partial", "--model", "new", "--token", "t"])
+    assert rc == 4
