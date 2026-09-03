@@ -7,9 +7,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from backends.base import checkpoint_cache_path, shard_paths
+from backends.base import shard_paths
 from backends.fake import FakeBackend
 import run_sharded_ingest as rsi
+
+
+@pytest.fixture(autouse=True)
+def _offline_hf_cache(monkeypatch):
+    """run_all now runs a laptop-side HF model pre-flight and mirrors the shard
+    cache local after every shard. Keep the orchestration unit tests offline;
+    individual tests override check_model to exercise the mismatch paths."""
+    monkeypatch.setattr(rsi.hf_cache, "check_model", lambda *a, **k: rsi.hf_cache.Ok())
+    monkeypatch.setattr(rsi.hf_cache, "mirror_to_local", lambda *a, **k: None)
 
 
 def test_prepare_once_teardown_once_on_happy_path(tmp_path):
@@ -43,13 +52,48 @@ def test_one_shard_failing_does_not_stop_the_rest(tmp_path):
     assert [c[0] for c in be.run_shard_calls] == [0, 1, 2]
 
 
-def test_seed_passed_only_when_accumulator_exists(tmp_path):
-    checkpoint_cache_path(tmp_path, 2).write_bytes(b"db")
+def test_model_ok_yields_seedmode_hf(tmp_path, monkeypatch):
+    import run_sharded_ingest as rsi
+    from backends.base import SeedMode
+    monkeypatch.setattr(rsi.hf_cache, "check_model", lambda *a, **k: rsi.hf_cache.Ok())
+    monkeypatch.setattr(rsi.hf_cache, "mirror_to_local", lambda *a, **k: None)
     be = FakeBackend()
-    rsi.run_all(be, [1, 2], 300, tmp_path)
-    seeds = {idx: seed for idx, _, seed in be.run_shard_calls}
-    assert seeds[1] is None
-    assert seeds[2] == checkpoint_cache_path(tmp_path, 2)
+    rsi.run_all(be, [0, 1], 300, tmp_path)
+    assert be.run_shard_calls == [(0, 300, SeedMode.HF), (1, 300, SeedMode.HF)]
+
+
+def test_model_mismatch_non_tty_no_flag_exits(tmp_path, monkeypatch):
+    import run_sharded_ingest as rsi
+    monkeypatch.setattr(rsi.hf_cache, "check_model",
+                        lambda *a, **k: rsi.hf_cache.Mismatch("old", "new"))
+    monkeypatch.setattr(rsi.hf_cache, "mirror_to_local", lambda *a, **k: None)
+    monkeypatch.setattr(rsi.sys.stdin, "isatty", lambda: False)
+    be = FakeBackend()
+    with __import__("pytest").raises(SystemExit):
+        rsi.run_all(be, [0], 300, tmp_path)
+    assert be.run_shard_calls == []
+
+
+def test_model_mismatch_with_flag_yields_overwrite(tmp_path, monkeypatch):
+    import run_sharded_ingest as rsi
+    from backends.base import SeedMode
+    monkeypatch.setattr(rsi.hf_cache, "check_model",
+                        lambda *a, **k: rsi.hf_cache.Mismatch("old", "new"))
+    monkeypatch.setattr(rsi.hf_cache, "mirror_to_local", lambda *a, **k: None)
+    be = FakeBackend()
+    rsi.run_all(be, [0], 300, tmp_path, reseed_on_model_mismatch=True)
+    assert be.run_shard_calls == [(0, 300, SeedMode.SEEDLESS_OVERWRITE)]
+
+
+def test_mirror_called_after_every_shard(tmp_path, monkeypatch):
+    import run_sharded_ingest as rsi
+    monkeypatch.setattr(rsi.hf_cache, "check_model", lambda *a, **k: rsi.hf_cache.Ok())
+    calls = []
+    monkeypatch.setattr(rsi.hf_cache, "mirror_to_local",
+                        lambda i, d, **k: calls.append(i))
+    be = FakeBackend(ok_by_index={1: False})
+    rsi.run_all(be, [0, 1], 300, tmp_path)
+    assert calls == [0, 1]  # mirror even when shard 1 failed
 
 
 def test_backend_arg_defaults_to_colab():

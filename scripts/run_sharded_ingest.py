@@ -19,10 +19,21 @@ from math import ceil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import runpod_driver
 from _envload import load_env
 from backends import get_backend
-from backends.base import IngestBackend, checkpoint_cache_path, shard_paths
+from backends.base import IngestBackend, SeedMode, shard_paths
+from lexausearch import hf_cache
+from lexausearch.models import DENSE_MODEL
+
+
+def _prompt_override(index: int, old: str, new: str) -> SeedMode:
+    print(f"[shard {index}] HF cache built with {old!r}, current model is {new!r}.")
+    ans = input("  [a]bort or [o]verride (run seedless, replace HF cache under the new model)? ").strip().lower()
+    if ans == "o":
+        return SeedMode.SEEDLESS_OVERWRITE
+    sys.exit(f"[shard {index}] aborted on model mismatch")
 
 
 def run_all(
@@ -30,6 +41,8 @@ def run_all(
     run_indices: list[int],
     shard_size: int,
     shards_dir: Path,
+    *,
+    reseed_on_model_mismatch: bool = False,
 ) -> dict[int, bool]:
     results: dict[int, bool] = {}
     try:
@@ -39,10 +52,22 @@ def run_all(
                 print(f"[shard {i}] already downloaded, skipping", file=sys.stderr)
                 results[i] = True
                 continue
-            seed = checkpoint_cache_path(shards_dir, i)
-            seed = seed if seed.exists() else None
-            result = backend.run_shard(i, shard_size, seed)
+            verdict = hf_cache.check_model(i, DENSE_MODEL, token=None)
+            if isinstance(verdict, hf_cache.Mismatch):
+                if reseed_on_model_mismatch:
+                    print(f"[shard {i}] model {verdict.old} -> {verdict.new}: "
+                          f"reseeding from scratch (flag)", file=sys.stderr)
+                    seed_mode = SeedMode.SEEDLESS_OVERWRITE
+                elif sys.stdin.isatty():
+                    seed_mode = _prompt_override(i, verdict.old, verdict.new)
+                else:
+                    sys.exit(f"[shard {i}] HF cache model {verdict.old} != current "
+                             f"{verdict.new}. Re-run with --reseed-on-model-mismatch.")
+            else:
+                seed_mode = SeedMode.HF
+            result = backend.run_shard(i, shard_size, seed_mode)
             results[i] = result.ok
+            hf_cache.mirror_to_local(i, shards_dir, token=None)
             if not result.ok:
                 print(
                     f"[shard {i}] failed: {result.diagnosis or 'no diagnosis'}",
@@ -80,6 +105,11 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Comma-separated shard indices to leave untouched this run. "
                          "Skipped shards are not attempted, not counted as failed, and "
                          "not listed in the merge instructions - add them by hand.")
+    ap.add_argument("--reseed-on-model-mismatch", action="store_true", dest="reseed_on_model_mismatch",
+                    help="Non-interactively take the override path on a model-version mismatch: "
+                         "run the shard seedless and replace its HF cache under the new model.")
+    ap.add_argument("--hf-cache-repo", default="cchew/lex-au-search-embed-cache", dest="hf_cache_repo",
+                    help="HF dataset repo for shard embed caches (point a smoke run at a throwaway).")
     return ap
 
 
@@ -89,6 +119,8 @@ def main(argv=None) -> None:
     if not args.reap and args.total_acts is None:
         parser.error("--total-acts is required unless --reap is given")
     load_env(__file__)
+    if args.hf_cache_repo != "cchew/lex-au-search-embed-cache":
+        hf_cache.HF_CACHE_REPO = args.hf_cache_repo
 
     if args.reap:
         # NOTE: --reap does not take the run lock - it will also terminate a
@@ -112,7 +144,8 @@ def main(argv=None) -> None:
               file=sys.stderr)
 
     backend = get_backend(args.backend, args)
-    results = run_all(backend, run_indices, args.shard_size, args.shards_dir)
+    results = run_all(backend, run_indices, args.shard_size, args.shards_dir,
+                      reseed_on_model_mismatch=args.reseed_on_model_mismatch)
 
     failed = [i for i, ok in results.items() if not ok]
     print(json.dumps({"total_shards": total_shards, "skipped_shards": sorted(skip),
