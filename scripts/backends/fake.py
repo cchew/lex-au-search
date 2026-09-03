@@ -3,9 +3,7 @@ without any cloud calls."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from backends.base import IngestBackend, ShardResult
+from backends.base import IngestBackend, ShardResult, SeedMode
 
 
 class FakeBackend(IngestBackend):
@@ -18,13 +16,13 @@ class FakeBackend(IngestBackend):
         self._raise_on_index = raise_on_index
         self.prepare_calls = 0
         self.teardown_calls = 0
-        self.run_shard_calls: list[tuple[int, int, Path | None]] = []
+        self.run_shard_calls: list[tuple[int, int, SeedMode]] = []
 
     def prepare(self) -> None:
         self.prepare_calls += 1
 
-    def run_shard(self, index: int, shard_size: int, seed_cache: Path | None) -> ShardResult:
-        self.run_shard_calls.append((index, shard_size, seed_cache))
+    def run_shard(self, index: int, shard_size: int, seed_mode: SeedMode) -> ShardResult:
+        self.run_shard_calls.append((index, shard_size, seed_mode))
         if self._raise_on_index == index:
             raise RuntimeError(f"FakeBackend forced failure on shard {index}")
         return ShardResult(index, self._ok_by_index.get(index, True), None, None, "")

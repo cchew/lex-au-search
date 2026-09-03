@@ -8,9 +8,15 @@ backend-agnostic orchestrator on top.
 
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+
+
+class SeedMode(enum.Enum):
+    HF = "hf"                          # fetch this shard's cache from HF (404 -> seedless)
+    SEEDLESS_OVERWRITE = "overwrite"   # model-override: run from scratch; every push carries --overwrite
 
 
 @dataclass
@@ -43,7 +49,7 @@ class IngestBackend(ABC):
         """Run once before any shard. Colab: no-op."""
 
     @abstractmethod
-    def run_shard(self, index: int, shard_size: int, seed_cache: Path | None) -> ShardResult:
+    def run_shard(self, index: int, shard_size: int, seed_mode: "SeedMode") -> ShardResult:
         """Own the entire per-shard lifecycle for this backend.
 
         Best-effort accumulator contract: on a FAILED return the backend has
@@ -51,7 +57,7 @@ class IngestBackend(ABC):
         `checkpoint_cache_path(shards_dir, index)` via
         `lexausearch.cache.merge_cache_files` - progress up to the last
         successful mid-run snapshot (the final interval may be lost, matching
-        Colab's existing `session_lost` behaviour).
+        Colab's existing `session_lost` behaviour, pushed to HF by the VM, then mirrored local by the orchestrator).
 
         Canonical zip-path contract: on an `ok=True` return the backend MUST
         have written both the storage zip and the cache zip to

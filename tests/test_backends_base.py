@@ -35,7 +35,7 @@ def test_subclass_missing_a_method_cannot_be_instantiated():
 def test_full_subclass_instantiates():
     class Full(IngestBackend):
         def prepare(self): ...
-        def run_shard(self, index, shard_size, seed_cache):
+        def run_shard(self, index, shard_size, seed_mode):
             return ShardResult(index, True, None, None, "")
         def teardown(self): ...
 
