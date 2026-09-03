@@ -6,14 +6,13 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The stock RunPod image (runpod/pytorch:*-cuda12.4.1-*) ships no `zip` or
-# `rsync`. ingest_shard.sh needs `zip` to package shard_storage/;
-# RunPodBackend._rsync_up needs `rsync` on the pod to receive the seed
-# accumulator over a resumable transfer (a single scp stream does not
-# survive the CGNAT client uplink). Colab VMs already have both, so
-# `command -v` skips the apt call there.
-command -v zip >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1 || {
-  apt-get update -qq && apt-get install -y -qq zip rsync
+# The stock RunPod image (runpod/pytorch:*-cuda12.4.1-*) ships no `zip`.
+# ingest_shard.sh needs `zip` to package shard_storage/. The pod now pulls
+# its own seed cache via `python -m lexausearch.hf_cache fetch` (HF over
+# HTTPS), so no resumable-transfer client is needed on the pod. Colab VMs
+# already have `zip`, so `command -v` skips the apt call there.
+command -v zip >/dev/null 2>&1 || {
+  apt-get update -qq && apt-get install -y -qq zip
 }
 
 pip install -e ".[gpu]"

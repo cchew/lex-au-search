@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from backends.base import checkpoint_cache_path
+from backends.base import SeedMode, checkpoint_cache_path
 from backends.runpod_backend import RunPodBackend
 
 
@@ -225,7 +225,7 @@ def test_detached_launch_command_shape(tmp_path):
             launched["cmd"] = cmd
         return orig(cmd, **kw)
     be._run = capture
-    be.run_shard(0, 300, seed_cache=None)
+    be.run_shard(0, 300, SeedMode.HF)
     j = " ".join(launched["cmd"])
     assert "ssh -f" in j or ("-f" in launched["cmd"])
     assert "setsid -w" in j
@@ -253,7 +253,7 @@ def test_detached_launch_string_is_valid_bash(tmp_path):
         return types.SimpleNamespace(returncode=0, stdout="0", stderr="")
     be._run = cap
     be._sleep = lambda *a, **k: None
-    be.run_shard(0, 300, seed_cache=None)
+    be.run_shard(0, 300, SeedMode.HF)
     r = subprocess.run(
         ["bash", "-n", "-c", captured["launch"]], capture_output=True, text=True
     )
@@ -274,7 +274,7 @@ def test_launch_without_job_log_fails_fast(tmp_path):
         return _started()
     be._run = fake_run
     be._sleep = lambda *a, **k: None
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "did not start" in res.diagnosis
     assert rd.terminated == []
@@ -293,7 +293,7 @@ def test_run_loop_gives_up_at_wall_clock_cap_without_terminating(tmp_path):
     be._run = fake_run
     be._sleep = lambda *a, **k: None
     be._run_deadline = 0.0  # monotonic() >= 0.0 -> cap hit on the first poll
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "wall-clock cap" in res.diagnosis
     assert "18h" in res.diagnosis
@@ -316,7 +316,7 @@ def test_deadline_resets_between_shards(tmp_path):
         return _started()
     be._run = fake_run
     be._sleep = lambda *a, **k: None
-    be.run_shard(1, 300, seed_cache=None)
+    be.run_shard(1, 300, SeedMode.HF)
     assert be._deadline_s is None  # reset on entry, never re-armed this shard
 
 
@@ -335,7 +335,7 @@ def test_poll_treats_absent_or_empty_exitcode_as_running(tmp_path):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     be._run = fake_run
     be._sleep = lambda *_: None
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is True
     assert polls == []  # all three polls consumed; empties were "running", not "failed"
 
@@ -356,7 +356,7 @@ def test_nonzero_exitcode_pulls_final_snapshot_and_sets_diagnosis(tmp_path, monk
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     be._run = fake_run
     be._sleep = lambda *_: None
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "boom" in res.diagnosis
     assert merged and merged[-1] == checkpoint_cache_path(tmp_path, 0)
@@ -371,7 +371,7 @@ def test_ssh_unreachable_checks_status_and_does_not_terminate_within_bound(tmp_p
     be._sleep = lambda *_: None
     # run_shard resets _deadline_s per shard, so pin it through the override seam.
     be._deadline_override = 0.0  # force the 25-min bound immediately for the test
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "unreachable" in res.diagnosis.lower()
     assert rd.terminated == []          # run_shard never terminates
@@ -394,26 +394,9 @@ def test_scp_back_failure_on_success_path_returns_failed_result(tmp_path):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     be._run = fake_run
     be._sleep = lambda *_: None
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "download" in res.diagnosis.lower()
-    assert rd.terminated == []
-
-
-def test_seed_read_failure_returns_failed_result(tmp_path):
-    # A corrupt / non-sqlite local accumulator is a local fault, not an
-    # unreachable pod: fail this shard cleanly with a "seed read failed" message.
-    rd = _FakeRD()
-    be = _prepared(tmp_path, rd)
-    seed = tmp_path / "seed.db"
-    seed.write_text("this is not a sqlite database")
-    def fake_run(cmd, **kw):
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    be._sleep = lambda *_: None
-    res = be.run_shard(0, 300, seed_cache=seed)
-    assert res.ok is False
-    assert "seed read failed" in res.diagnosis.lower()
     assert rd.terminated == []
 
 
@@ -434,7 +417,7 @@ def test_poll_loop_ssh_drop_gives_up_at_deadline_without_terminating(tmp_path):
     be._run = fake_run
     be._sleep = lambda *_: None
     be._deadline_override = 0.0  # monotonic() >= 0.0 always true -> give up first cycle
-    res = be.run_shard(0, 300, seed_cache=None)
+    res = be.run_shard(0, 300, SeedMode.HF)
     assert res.ok is False
     assert "unreachable" in res.diagnosis.lower()
     assert rd.terminated == []
@@ -488,7 +471,7 @@ def test_snapshot_backup_cds_into_workdir_not_tilde_literal(tmp_path):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     be._run = fake_run
     be._sleep = lambda *_: None
-    be.run_shard(0, 300, seed_cache=None)
+    be.run_shard(0, 300, SeedMode.HF)
     backup = next(s for s in seen if "sqlite3" in s and "backup" in s)
     assert backup.startswith("cd ~/lex-au-search/run/shard_000 &&")
     assert "connect('shard_cache.db')" in backup
@@ -508,150 +491,6 @@ def test_scp_base_uses_a_dedicated_connection_not_the_ssh_controlmaster(tmp_path
     assert "ControlPath=none" in base
     assert "cm-lexau" not in base
     assert "ServerAliveInterval=15" in base
-
-
-def _scp_probe_run(remote_size_by_attempt, *, scp_rc=0):
-    """fake _run that answers `stat -c %s` with the next size in the list and
-    every scp invocation with scp_rc."""
-    sizes = list(remote_size_by_attempt)
-    def fake_run(cmd, **kw):
-        if cmd and cmd[0] == "scp":
-            return types.SimpleNamespace(returncode=scp_rc, stdout="", stderr="boom")
-        if cmd and cmd[0] == "ssh" and str(cmd[-1]).startswith("stat -c %s"):
-            nxt = sizes.pop(0) if sizes else sizes_last[0]
-            return types.SimpleNamespace(returncode=0, stdout=f"{nxt}\n", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    sizes_last = [remote_size_by_attempt[-1]] if remote_size_by_attempt else [-1]
-    return fake_run
-
-
-def test_scp_to_retries_and_raises_on_persistent_truncation(tmp_path):
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 800)                       # want == 800
-    be._run = _scp_probe_run([48, 48, 48])             # remote always short
-    with pytest.raises(RuntimeError) as e:
-        be._scp_to(local, "~/w/shard_cache_seed.db")
-    msg = str(e.value)
-    assert "after 3 attempts" in msg
-    assert "local=800" in msg and "remote=48" in msg
-
-
-def test_scp_to_returns_once_remote_size_matches(tmp_path):
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 800)
-    calls = {"scp": 0}
-    def fake_run(cmd, **kw):
-        if cmd and cmd[0] == "scp":
-            calls["scp"] += 1
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if cmd and cmd[0] == "ssh" and str(cmd[-1]).startswith("stat -c %s"):
-            size = 48 if calls["scp"] < 2 else 800    # short, then full
-            return types.SimpleNamespace(returncode=0, stdout=f"{size}\n", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    be._scp_to(local, "~/w/shard_cache_seed.db")        # must not raise
-    assert calls["scp"] == 2
-
-
-def test_seed_upload_ssh_failure_is_labelled_seed_upload_not_unreachable(tmp_path, monkeypatch):
-    rd = _FakeRD()
-    be = _prepared(tmp_path, rd)
-    be._sleep = lambda *_: None
-    seed = tmp_path / "seed.db"
-    import sqlite3 as _sq
-    c = _sq.connect(seed); c.execute("create table embed_cache(k text)"); c.commit(); c.close()
-    monkeypatch.setattr(be, "_upload_seed", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scp upload to X failed after 3 attempts (rc=0 local=800 remote=48)")))
-    res = be.run_shard(0, 300, seed_cache=seed)
-    assert res.ok is False
-    assert "seed upload failed" in res.diagnosis.lower()
-    assert "unreachable" not in res.diagnosis.lower()
-    assert rd.terminated == []
-
-
-def test_rsync_up_command_shape(tmp_path):
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 500)
-    seen = []
-    def fake_run(cmd, **kw):
-        seen.append(cmd)
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    be._remote_size = lambda *_: 500          # matches immediately
-    be._rsync_up(local, "~/w/shard_cache_seed.db")
-    rs = next(c for c in seen if c and c[0] == "rsync")
-    j = " ".join(rs)
-    assert "--partial" in rs and "--append" in rs and "--inplace" in rs
-    assert "--no-whole-file" in rs
-    assert any(x.startswith("--timeout=") for x in rs)
-    e_idx = rs.index("-e")
-    assert "ControlPath=none" in rs[e_idx + 1]
-    assert rs[-1].endswith(":~/w/shard_cache_seed.db")
-
-
-def test_rsync_up_loops_until_remote_size_reaches_local(tmp_path):
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 900)
-    be._run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    sizes = iter([300, 600, 900])
-    be._remote_size = lambda *_: next(sizes)
-    be._rsync_up(local, "~/w/seed.db")        # must return without raising
-
-
-def test_rsync_up_aborts_when_no_forward_progress(tmp_path):
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 900)
-    be._run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._remote_size = lambda *_: 128          # stuck, never grows
-    with pytest.raises(RuntimeError) as e:
-        be._rsync_up(local, "~/w/seed.db")
-    assert "no forward progress" in str(e.value)
-    assert "128/900" in str(e.value)
-
-
-def test_rsync_up_treats_a_timed_out_round_as_a_retry(tmp_path):
-    import subprocess as _sp
-    be = _prepared(tmp_path, _FakeRD())
-    be._sleep = lambda *_: None
-    local = tmp_path / "seed_flat.db"
-    local.write_bytes(b"x" * 400)
-    calls = {"n": 0}
-    def fake_run(cmd, **kw):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _sp.TimeoutExpired(cmd, 1)   # first round dies mid-transfer
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    sizes = iter([150, 400])
-    be._remote_size = lambda *_: next(sizes)
-    be._rsync_up(local, "~/w/seed.db")         # timeout is not fatal
-    assert calls["n"] == 2
-
-
-def test_upload_seed_uses_rsync_not_scp(tmp_path, monkeypatch):
-    import sqlite3 as _sq
-    rd = _FakeRD()
-    be = _prepared(tmp_path, rd)
-    seed = tmp_path / "seed.db"
-    c = _sq.connect(seed)
-    c.execute("create table embed_cache(k text)")
-    c.executemany("insert into embed_cache values (?)", [("a",), ("b",), ("c",)])
-    c.commit(); c.close()
-    used = {}
-    monkeypatch.setattr(be, "_rsync_up", lambda l, r: used.setdefault("rsync", (l, r)))
-    monkeypatch.setattr(be, "_scp_to", lambda *a, **k: (_ for _ in ()).throw(AssertionError("scp must not be used for the seed")))
-    monkeypatch.setattr(be, "_ssh_check", lambda *_: "3")   # remote row count
-    assert be._upload_seed("~/lex-au-search/run/shard_000", seed) is None
-    assert "rsync" in used
 
 
 def test_ssh_base_has_no_remote_command(tmp_path):
@@ -679,3 +518,62 @@ def test_write_hf_token_pipes_via_stdin_not_argv(tmp_path, monkeypatch):
     assert "hf_secretvalue" not in " ".join(captured["cmd"])
     assert captured["input"] == "hf_secretvalue"
     assert "cat > ~/.cache/huggingface/token" in " ".join(captured["cmd"])
+
+
+# ----------------------------------------------- Task 14: SeedMode fetch swap
+
+
+def test_seedmode_hf_issues_hf_fetch_over_ssh(tmp_path, monkeypatch):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    calls = []
+    class _R:
+        returncode = 0
+        stdout = "fetched shard 0 gen 3"
+        stderr = ""
+    monkeypatch.setattr(be, "_gpu_pids", lambda: "")  # GPU idle; Step 0 proceeds
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: calls.append(remote) or _R())
+    monkeypatch.setattr(be, "_launch_detached", lambda *a, **k: None)  # stub the rest
+    monkeypatch.setattr(
+        be, "_poll_to_terminal",
+        lambda *a, **k: __import__("backends.base", fromlist=["ShardResult"]).ShardResult(
+            0, True, tmp_path / "s.zip", tmp_path / "c.zip", ""
+        ),
+    )
+    be.run_shard(0, 300, SeedMode.HF)
+    assert any("python -m lexausearch.hf_cache fetch 0" in c for c in calls)
+    assert any("--expect-model snowflake/snowflake-arctic-embed-l" in c for c in calls)
+
+
+def test_seedmode_hf_fetch_nonzero_fails_shard_without_launch(tmp_path, monkeypatch):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    class _R:
+        returncode = 4
+        stdout = ""
+        stderr = "MODEL MISMATCH: shard 0 ..."
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: _R())
+    launched = []
+    monkeypatch.setattr(be, "_launch_detached", lambda *a, **k: launched.append(1))
+    res = be.run_shard(0, 300, SeedMode.HF)
+    assert res.ok is False and "MODEL MISMATCH" in res.diagnosis
+    assert not launched
+
+
+def test_seedmode_overwrite_skips_fetch(tmp_path, monkeypatch):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    calls = []
+    class _R:
+        returncode = 0; stdout = ""; stderr = ""
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: calls.append(remote) or _R())
+    monkeypatch.setattr(be, "_launch_detached", lambda *a, **k: None)
+    monkeypatch.setattr(
+        be, "_poll_to_terminal",
+        lambda *a, **k: __import__("backends.base", fromlist=["ShardResult"]).ShardResult(
+            0, True, tmp_path / "s.zip", tmp_path / "c.zip", ""
+        ),
+    )
+    be.run_shard(0, 300, SeedMode.SEEDLESS_OVERWRITE)
+    assert not any("hf_cache fetch" in c for c in calls)
+    assert be._overwrite is True

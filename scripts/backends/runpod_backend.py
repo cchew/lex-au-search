@@ -16,7 +16,6 @@ import atexit
 import fcntl
 import os
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -26,9 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import runpod_driver as _runpod_driver
 from lexausearch.cache import merge_cache_files
+from lexausearch.models import DENSE_MODEL
 
 from backends.base import (
     IngestBackend,
+    SeedMode,
     ShardResult,
     checkpoint_cache_path,
     shard_paths,
@@ -373,16 +374,14 @@ class RunPodBackend(IngestBackend):
     RUN_MAX_S = 18 * 3600
 
     def run_shard(
-        self, index: int, shard_size: int, seed_cache: Path | None
+        self, index: int, shard_size: int, seed_mode: SeedMode
     ) -> ShardResult:
         # Per-shard reset: one shard's SSH blip must not pin the unreachable
         # budget for the rest of the run. Tests pin _deadline_override.
         self._deadline_s = self._deadline_override
-        run_deadline = (
-            self._run_deadline
-            if self._run_deadline is not None
-            else time.monotonic() + self.RUN_MAX_S
-        )
+        # Read by every hf_cache push in Task 15: SEEDLESS_OVERWRITE replaces
+        # this shard's HF file rather than pull-merging into it.
+        self._overwrite = seed_mode is SeedMode.SEEDLESS_OVERWRITE
         work = f"~/lex-au-search/run/shard_{index:03d}"
         ckpt = checkpoint_cache_path(self.shards_dir, index)
 
@@ -399,27 +398,43 @@ class RunPodBackend(IngestBackend):
         except _SSH_ERRORS:
             return self._give_up_unreachable(index, work, ckpt)
 
-        # --- Step 1: seed the remote accumulator, verify the row count ----
-        if seed_cache is not None and seed_cache.exists():
-            try:
-                mismatch = self._upload_seed(work, seed_cache)
-            except _SSH_ERRORS as e:
-                # A failed seed upload is not an unreachable pod - don't route
-                # it through _give_up_unreachable (whose pre-ingest snapshot
-                # just logs a spurious "no such table: embed_cache").
+        # --- Step 1: seed shard_cache_seed.db from HF (HF mode only) -----
+        # The pod pulls its own seed - no laptop->pod upload. Exit 0 (incl.
+        # cold-start, which writes nothing) -> proceed; ingest_shard.sh
+        # tolerates an absent seed file. Any non-zero exit (model mismatch,
+        # corruption, network) fails the shard with no launch.
+        if seed_mode is SeedMode.HF:
+            fetch = self._ssh(
+                f"cd {work} && python -m lexausearch.hf_cache fetch {index} "
+                f"--dest {work} --seed-as shard_cache_seed.db "
+                f"--expect-model {DENSE_MODEL}",
+                check=False,
+            )
+            if getattr(fetch, "returncode", 0) != 0:
                 return ShardResult(
-                    index, False, None, None, f"seed upload failed: {e}"
+                    index,
+                    False,
+                    None,
+                    None,
+                    f"HF seed fetch failed: {getattr(fetch, 'stderr', '') or ''}",
                 )
-            except sqlite3.Error as e:
-                # Corrupt / locked local accumulator - a local fault, not an
-                # unreachable pod. Fail this shard cleanly.
-                return ShardResult(
-                    index, False, None, None, f"seed read failed: {e}"
-                )
-            if mismatch is not None:
-                return ShardResult(index, False, None, None, mismatch)
 
         # --- Step 2: detached launch ------------------------------------
+        outcome = self._launch_detached(index, shard_size, work)
+        if outcome is not None:
+            return outcome
+
+        # --- Steps 3-5: poll to a terminal state ----------------------
+        return self._poll_to_terminal(index, work, seed_mode)
+
+    def _launch_detached(
+        self, index: int, shard_size: int, work: str
+    ) -> ShardResult | None:
+        """Fire the detached ingest job, then prove it actually started.
+        Returns a failed ShardResult when the pod is unreachable or no
+        job.log appeared; None means the poll loop should proceed."""
+        ckpt = checkpoint_cache_path(self.shards_dir, index)
+
         # Every token here is load-bearing and asserted verbatim by the tests:
         # `-f` + DEVNULL on both streams so ssh returns immediately; the
         # `( ... ) &` subshell so the job outlives the connection; `setsid -w`
@@ -472,12 +487,24 @@ class RunPodBackend(IngestBackend):
                 None,
                 "detached ingest job did not start (no job.log 3s after launch)",
             )
+        return None
 
-        # --- Steps 3-5: poll to a terminal state ----------------------
+    def _poll_to_terminal(
+        self, index: int, work: str, seed_mode: SeedMode
+    ) -> ShardResult:
+        """Poll job.exitcode until the shard reaches a terminal state, pulling
+        best-effort checkpoints along the way. `seed_mode` (mirrored in
+        `self._overwrite`) is consumed by the Task 15 checkpoint pushes."""
+        ckpt = checkpoint_cache_path(self.shards_dir, index)
+        run_deadline = (
+            self._run_deadline
+            if self._run_deadline is not None
+            else time.monotonic() + self.RUN_MAX_S
+        )
         poll_count = 0
         while True:
             try:
-                code = self._read_exitcode(work)
+                code = self._read_exit_code(work)
             except _SSH_ERRORS:
                 verdict = self._handle_ssh_failure(index, work, ckpt)
                 if verdict is not None:
@@ -489,11 +516,13 @@ class RunPodBackend(IngestBackend):
                 self._log_trend(work)
                 poll_count += 1
                 if poll_count % self.CHECKPOINT_INTERVAL_POLLS == 0:
+                    # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
                     self._safe_snapshot(index, work, ckpt)
                 if time.monotonic() >= run_deadline:
                     # Reachable but never terminal. Salvage the cache and hand
                     # back a failed shard; the pod stays up for teardown to deal
                     # with (run_shard never terminates).
+                    # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
                     self._safe_snapshot(index, work, ckpt)
                     return ShardResult(
                         index,
@@ -533,9 +562,10 @@ class RunPodBackend(IngestBackend):
                 return ShardResult(index, True, storage_zip, cache_zip, "")
 
             # Non-zero terminal: salvage whatever the cache reached, then report.
+            # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
             self._safe_snapshot(index, work, ckpt)
             try:
-                diagnosis = self._ssh_check(f"tail -n 200 {work}/job.log")
+                diagnosis = self._tail_job_log(work)
             except _SSH_ERRORS:
                 diagnosis = f"shard exited {rc}; job.log unavailable"
             return ShardResult(index, False, None, None, diagnosis)
@@ -548,9 +578,14 @@ class RunPodBackend(IngestBackend):
         )
         return (getattr(res, "stdout", "") or "").strip()
 
-    def _read_exitcode(self, work: str) -> str:
+    def _read_exit_code(self, work: str) -> str:
         res = self._ssh(f"cat {work}/job.exitcode 2>/dev/null", check=False)
         return (getattr(res, "stdout", "") or "").strip()
+
+    def _tail_job_log(self, work: str, n: int = 200) -> str:
+        """Last `n` lines of the remote job.log (stripped). Raises on a
+        non-zero ssh exit."""
+        return self._ssh_check(f"tail -n {n} {work}/job.log")
 
     def _log_trend(self, work: str) -> None:
         """One best-effort progress line per running poll. Never raises."""
@@ -570,41 +605,6 @@ class RunPodBackend(IngestBackend):
             )
         except Exception:  # noqa: BLE001 - trend logging must never break the loop
             pass
-
-    def _upload_seed(self, work: str, seed_cache: Path) -> str | None:
-        """Flatten the local accumulator, scp it up, and prove the remote copy
-        has the same row count. Returns a diagnosis string on mismatch, else
-        None."""
-        conn = sqlite3.connect(str(seed_cache))
-        try:
-            local_rows = conn.execute(
-                "SELECT COUNT(*) FROM embed_cache"
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        with tempfile.TemporaryDirectory() as td:
-            flat = Path(td) / "seed_flat.db"
-            src = sqlite3.connect(str(seed_cache))
-            dst = sqlite3.connect(str(flat))
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
-            # rsync-resume, not scp: the client uplink is CGNAT and a single
-            # stream never completes a ~760MB file (see _rsync_up).
-            self._rsync_up(flat, f"{work}/shard_cache_seed.db")
-        remote = self._ssh_check(
-            "python3 -c \"import sqlite3; print(sqlite3.connect('"
-            f"{work}/shard_cache_seed.db')"
-            ".execute('SELECT COUNT(*) FROM embed_cache').fetchone()[0])\""
-        )
-        if int(remote) != int(local_rows):
-            return (
-                f"seed upload row-count mismatch: local={local_rows} "
-                f"remote={remote}"
-            )
-        return None
 
     def _snapshot(self, index: int, work: str, ckpt: Path) -> None:
         """Consistent copy of the live remote cache -> fold into the local
@@ -687,84 +687,6 @@ class RunPodBackend(IngestBackend):
             return int(out.split()[0])
         except (ValueError, IndexError):
             return -1
-
-    # --- large-file upload over a CGNAT/NAT64 client link -----------------
-    # A single sustained TCP stream to a RunPod pod does not survive a
-    # carrier-grade-NAT uplink: scp stalls at a random 9-48MB point (rc still
-    # 0), runpodctl/croc panics on a big socket write. rsync --partial
-    # --append is the only thing that gets a ~760MB seed across - it resumes
-    # from the last byte after each reset. Loop it until the remote size
-    # matches or forward progress stops.
-    _RSYNC_ITER_TIMEOUT_S = 120
-    _RSYNC_MAX_WALL_S = 3600
-    _RSYNC_NO_PROGRESS_LIMIT = 3
-
-    def _rsync_up(self, local: Path, remote_path: str) -> None:
-        want = local.stat().st_size
-        ssh_e = (
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
-            "-o ControlMaster=no -o ControlPath=none "
-            "-o ServerAliveInterval=10 -o ServerAliveCountMax=6 "
-            f"-i {os.path.expanduser(self.ssh_key)} -p {self._port}"
-        )
-        deadline = time.monotonic() + self._RSYNC_MAX_WALL_S
-        last_size = -1
-        stalls = 0
-        while time.monotonic() < deadline:
-            try:
-                self._run(
-                    [
-                        "rsync", "--partial", "--inplace", "--append",
-                        "--no-whole-file",
-                        f"--timeout={self._RSYNC_ITER_TIMEOUT_S}",
-                        "-e", ssh_e,
-                        str(local), f"root@{self._ip}:{remote_path}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=self._RSYNC_ITER_TIMEOUT_S + 30,
-                )
-            except subprocess.SubprocessError:
-                pass  # this round timed out/died; check progress and retry
-            got = self._remote_size(remote_path)
-            if got >= want:
-                return
-            stalls = stalls + 1 if got <= last_size else 0
-            last_size = got
-            if stalls >= self._RSYNC_NO_PROGRESS_LIMIT:
-                raise RuntimeError(
-                    f"rsync upload to {remote_path} stalled at {got}/{want} "
-                    f"bytes ({stalls} attempts with no forward progress)"
-                )
-            self._sleep(3)
-        raise RuntimeError(
-            f"rsync upload to {remote_path} did not finish within "
-            f"{self._RSYNC_MAX_WALL_S}s (reached {last_size}/{want})"
-        )
-
-    def _scp_to(self, local: Path, remote_path: str) -> None:
-        want = local.stat().st_size
-        last = ""
-        for attempt in range(1, self._SCP_ATTEMPTS + 1):
-            res = self._run(
-                self._scp_base() + [str(local), f"root@{self._ip}:{remote_path}"],
-                capture_output=True,
-                text=True,
-                timeout=1800,
-            )
-            rc = getattr(res, "returncode", 0)
-            got = self._remote_size(remote_path) if rc == 0 else -1
-            if rc == 0 and got == want:
-                return
-            last = (
-                f"rc={rc} local={want} remote={got} "
-                f"{getattr(res, 'stderr', '') or ''}".strip()
-            )
-            self._sleep(5)
-        raise RuntimeError(
-            f"scp upload to {remote_path} failed after {self._SCP_ATTEMPTS} "
-            f"attempts ({last})"
-        )
 
     def _scp_back(self, remote_path: str, local: Path) -> None:
         want = self._remote_size(remote_path)
