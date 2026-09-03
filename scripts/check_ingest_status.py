@@ -23,6 +23,7 @@ from math import ceil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import colab_driver as cd
 
 
@@ -70,6 +71,8 @@ def main() -> None:
                     help="Which ingest backend; --probe-quota only applies to colab.")
     ap.add_argument("--probe-quota", action="store_true",
                      help="Create+stop a real T4 session to check GPU availability")
+    ap.add_argument("--no-hf", action="store_true",
+                     help="Skip the HF cache section in the report")
     args = ap.parse_args()
 
     total_acts = args.total_acts or _corpus_act_count(args.corpus_index)
@@ -114,6 +117,25 @@ def main() -> None:
         )
     else:
         print(f"\nAll {total_shards} shards complete - ready for merge-shards.", file=sys.stderr)
+
+    if not args.no_hf:
+        print("\nHF cache:")
+        try:
+            from lexausearch import hf_cache
+            cat = hf_cache.read_catalogue(token=None)
+            if cat is None:
+                print("  (no catalogue.json in the HF repo yet)")
+            else:
+                n = -(-cat.total_acts // cat.shard_size)
+                print(f"  {'shard':>5} {'gen':>4} {'rows':>8} {'status':>9}  model")
+                for i in range(n):
+                    m = hf_cache._read_sidecar(i, None)
+                    if m is None:
+                        print(f"  {i:>5} {'-':>4} {'-':>8} {'absent':>9}")
+                    else:
+                        print(f"  {i:>5} {m.generation:>4} {m.row_count:>8} {m.status:>9}  {m.model_name}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  unreachable ({type(e).__name__}: {e})")
 
 
 if __name__ == "__main__":
