@@ -146,3 +146,86 @@ def test_fetch_model_mismatch_raises(tmp_path, monkeypatch):
     _wire_hf(monkeypatch, src, sidecar)
     with pytest.raises(hf_cache.HfCacheModelMismatch):
         hf_cache.fetch_shard_cache(0, tmp_path, token=None, expect_model="new")
+
+
+class _FakeApi:
+    def __init__(self):
+        self.commits = []
+
+    def create_commit(self, repo_id, repo_type, operations, commit_message, parent_commit=None, token=None):
+        self.commits.append({"ops": operations, "parent": parent_commit})
+
+
+def test_push_non_overwrite_merges_and_bumps_generation(tmp_path, monkeypatch):
+    head = tmp_path / "head.db"
+    _make_db(head, 4)
+    local = tmp_path / "local.db"
+    _make_db(local, 6)  # 6 fresh rows, ids id0..id5; head has id0..id3
+    head_sidecar = {"model_name": "m", "row_count": 4, "generation": 7,
+                    "updated_at": "t", "sha256": _sha256(head), "status": "partial"}
+    _wire_hf(monkeypatch, head, head_sidecar)
+    fake = _FakeApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+    captured = {}
+    real_merge = hf_cache.merge_cache_files
+    def _spy(paths, out):
+        captured["paths"] = [str(p) for p in paths]
+        return real_merge(paths, out)
+    monkeypatch.setattr(hf_cache, "merge_cache_files", _spy)
+
+    meta = hf_cache.push_shard_cache(0, local, model_name="m", status="partial", token="t")
+
+    assert meta.generation == 8
+    assert len(captured["paths"]) == 2  # [head, local]
+    assert len(fake.commits) == 1
+    assert len(fake.commits[0]["ops"]) == 2  # DB + sidecar
+
+
+def test_push_overwrite_skips_merge_and_head_check(tmp_path, monkeypatch):
+    local = tmp_path / "local.db"
+    _make_db(local, 3)
+    # head sidecar has a DIFFERENT model; overwrite must ignore it
+    head_sidecar = {"model_name": "old", "row_count": 4, "generation": 2,
+                    "updated_at": "t", "sha256": "x", "status": "partial"}
+    _wire_hf(monkeypatch, local, head_sidecar)
+    fake = _FakeApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+    merge_called = []
+    monkeypatch.setattr(hf_cache, "merge_cache_files", lambda *a: merge_called.append(1))
+
+    meta = hf_cache.push_shard_cache(0, local, model_name="new", status="complete",
+                                     token="t", overwrite=True)
+
+    assert not merge_called
+    assert meta.model_name == "new" and meta.generation == 3
+
+
+def test_push_non_overwrite_head_model_mismatch_raises(tmp_path, monkeypatch):
+    local = tmp_path / "local.db"
+    _make_db(local, 3)
+    head_sidecar = {"model_name": "old", "row_count": 4, "generation": 2,
+                    "updated_at": "t", "sha256": "x", "status": "partial"}
+    _wire_hf(monkeypatch, local, head_sidecar)
+    monkeypatch.setattr(hf_cache, "_api", lambda: _FakeApi())
+    with pytest.raises(hf_cache.HfCacheModelMismatch):
+        hf_cache.push_shard_cache(0, local, model_name="new", status="partial", token="t")
+
+
+def test_push_live_backs_up_before_reading(tmp_path, monkeypatch):
+    live_db = tmp_path / "live.db"
+    _make_db(live_db, 2)
+    _wire_hf(monkeypatch, live_db, None)  # cold head
+    monkeypatch.setattr(hf_cache, "_read_sidecar", lambda i, t: None)
+    fake = _FakeApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+    seen = []
+    real_backup = hf_cache._sqlite_backup
+    def _spy(src, dst):
+        seen.append((str(src), str(dst)))
+        return real_backup(src, dst)
+    monkeypatch.setattr(hf_cache, "_sqlite_backup", _spy)
+
+    meta = hf_cache.push_shard_cache(0, live_db, model_name="m", status="partial",
+                                    token="t", live=True)
+    assert seen  # backup was taken
+    assert meta.generation == 1  # no head

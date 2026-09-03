@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from huggingface_hub import HfApi, hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+from huggingface_hub import HfApi, hf_hub_download, CommitOperationAdd
+from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, HfHubHTTPError
 
 HF_CACHE_REPO = "cchew/lex-au-search-embed-cache"
 _HUB_TOKEN_PATH = Path.home() / ".cache" / "huggingface" / "token"
@@ -177,3 +177,93 @@ def fetch_shard_cache(shard_index: int, dest: Path, *, token: str | None,
     target = dest / (seed_as or _shard_db_name(shard_index))
     shutil.copyfile(db_src, target)
     return meta
+
+
+# Imported lazily inside push to keep module import light for callers that
+# never push (orchestrator pre-flight).
+def _merge_cache_files(paths, out):
+    from lexausearch.cache import merge_cache_files
+    return merge_cache_files(paths, out)
+
+
+merge_cache_files = _merge_cache_files  # test seam
+
+
+def _api() -> HfApi:
+    return HfApi()
+
+
+def _sqlite_backup(src: Path, dst: Path) -> None:
+    s = sqlite3.connect(str(src))
+    d = sqlite3.connect(str(dst))
+    try:
+        s.backup(d)
+    finally:
+        d.close()
+        s.close()
+
+
+def _write_sidecar(path: Path, meta: ShardCacheMeta) -> None:
+    path.write_text(json.dumps({
+        "model_name": meta.model_name, "row_count": meta.row_count,
+        "generation": meta.generation, "updated_at": meta.updated_at,
+        "sha256": meta.sha256, "status": meta.status,
+    }, indent=2))
+
+
+def push_shard_cache(shard_index: int, local_db: Path, *, model_name: str,
+                     status: str, token: str, overwrite: bool = False,
+                     live: bool = False) -> ShardCacheMeta:
+    local_db = Path(local_db)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        working = tdp / "working.db"
+        if live:
+            _sqlite_backup(local_db, working)
+        else:
+            shutil.copyfile(local_db, working)
+
+        head = _read_sidecar(shard_index, token)
+        if not overwrite and head is not None:
+            if head.model_name != model_name:
+                raise HfCacheModelMismatch(
+                    f"shard {shard_index} HF head model {head.model_name!r} != {model_name!r}; "
+                    f"refusing to merge (use the override path to replace)"
+                )
+            head_db = Path(_hf_download(HF_CACHE_REPO, _shard_db_name(shard_index), token))
+            merged = tdp / "merged.db"
+            merge_cache_files([head_db, working], merged)
+            upload_db = merged
+        else:
+            upload_db = working
+
+        gen = 1 if head is None else head.generation + 1
+        meta = ShardCacheMeta(
+            model_name=model_name, row_count=_row_count(upload_db),
+            generation=gen, updated_at=_now(),
+            sha256=_sha256_file(upload_db), status=status,
+        )
+        sidecar_path = tdp / _shard_json_name(shard_index)
+        _write_sidecar(sidecar_path, meta)
+
+        ops = [
+            CommitOperationAdd(path_in_repo=_shard_db_name(shard_index), path_or_fileobj=str(upload_db)),
+            CommitOperationAdd(path_in_repo=_shard_json_name(shard_index), path_or_fileobj=str(sidecar_path)),
+        ]
+        for attempt in (1, 2):
+            try:
+                _api().create_commit(
+                    repo_id=HF_CACHE_REPO, repo_type="dataset", operations=ops,
+                    commit_message=f"shard {shard_index}: gen {gen} ({status})",
+                    token=token,
+                )
+                break
+            except HfHubHTTPError as e:
+                if attempt == 1 and getattr(e.response, "status_code", None) == 412:
+                    head = _read_sidecar(shard_index, token)
+                    gen = 1 if head is None else head.generation + 1
+                    meta = ShardCacheMeta(**{**meta.__dict__, "generation": gen})
+                    _write_sidecar(sidecar_path, meta)
+                    continue
+                raise
+        return meta
