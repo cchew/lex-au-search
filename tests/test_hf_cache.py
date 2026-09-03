@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -149,10 +150,18 @@ def test_fetch_model_mismatch_raises(tmp_path, monkeypatch):
 
 
 class _FakeApi:
-    def __init__(self):
+    def __init__(self, fail_once_with_412=False):
         self.commits = []
+        self.fail_once_with_412 = fail_once_with_412
+        self._create_commit_called = 0
 
     def create_commit(self, repo_id, repo_type, operations, commit_message, parent_commit=None, token=None):
+        self._create_commit_called += 1
+        if self.fail_once_with_412 and self._create_commit_called == 1:
+            from huggingface_hub.utils import HfHubHTTPError
+            mock_response = Mock()
+            mock_response.status_code = 412
+            raise HfHubHTTPError("conflict", response=mock_response)
         self.commits.append({"ops": operations, "parent": parent_commit})
 
 
@@ -177,6 +186,12 @@ def test_push_non_overwrite_merges_and_bumps_generation(tmp_path, monkeypatch):
 
     assert meta.generation == 8
     assert len(captured["paths"]) == 2  # [head, local]
+    # Verify paths are distinct: head_db and working.db
+    assert captured["paths"][0] != captured["paths"][1]
+    # Verify first path is the head DB (created by _hf_download stub)
+    assert Path(captured["paths"][0]).name == Path(head).name
+    # Verify second path is working.db
+    assert "working.db" in captured["paths"][1]
     assert len(fake.commits) == 1
     assert len(fake.commits[0]["ops"]) == 2  # DB + sidecar
 
@@ -206,9 +221,12 @@ def test_push_non_overwrite_head_model_mismatch_raises(tmp_path, monkeypatch):
     head_sidecar = {"model_name": "old", "row_count": 4, "generation": 2,
                     "updated_at": "t", "sha256": "x", "status": "partial"}
     _wire_hf(monkeypatch, local, head_sidecar)
-    monkeypatch.setattr(hf_cache, "_api", lambda: _FakeApi())
+    fake = _FakeApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
     with pytest.raises(hf_cache.HfCacheModelMismatch):
         hf_cache.push_shard_cache(0, local, model_name="new", status="partial", token="t")
+    # Verify NO commit was made (raises before commit)
+    assert fake.commits == []
 
 
 def test_push_live_backs_up_before_reading(tmp_path, monkeypatch):
@@ -218,14 +236,67 @@ def test_push_live_backs_up_before_reading(tmp_path, monkeypatch):
     monkeypatch.setattr(hf_cache, "_read_sidecar", lambda i, t: None)
     fake = _FakeApi()
     monkeypatch.setattr(hf_cache, "_api", lambda: fake)
-    seen = []
+    call_order = []
     real_backup = hf_cache._sqlite_backup
-    def _spy(src, dst):
-        seen.append((str(src), str(dst)))
+    def _spy_backup(src, dst):
+        call_order.append("backup")
         return real_backup(src, dst)
-    monkeypatch.setattr(hf_cache, "_sqlite_backup", _spy)
+    real_row_count = hf_cache._row_count
+    def _spy_row_count(db_path):
+        call_order.append("row_count")
+        return real_row_count(db_path)
+    monkeypatch.setattr(hf_cache, "_sqlite_backup", _spy_backup)
+    monkeypatch.setattr(hf_cache, "_row_count", _spy_row_count)
 
     meta = hf_cache.push_shard_cache(0, live_db, model_name="m", status="partial",
                                     token="t", live=True)
-    assert seen  # backup was taken
+    # Verify backup precedes row_count (reading the DB)
+    assert call_order[0] == "backup"
+    assert "row_count" in call_order
     assert meta.generation == 1  # no head
+
+
+def test_push_412_retry_re_reads_head_and_bumps_generation(tmp_path, monkeypatch):
+    local = tmp_path / "local.db"
+    _make_db(local, 5)
+    head = tmp_path / "head.db"
+    _make_db(head, 3)
+
+    # First read returns initial head (gen 2), second read (after 412) returns updated head (gen 5)
+    read_sidecar_calls = [0]
+    initial_head = {"model_name": "m", "row_count": 3, "generation": 2,
+                    "updated_at": "t", "sha256": _sha256(head), "status": "partial"}
+    retried_head = {"model_name": "m", "row_count": 3, "generation": 5,
+                    "updated_at": "t2", "sha256": _sha256(head), "status": "partial"}
+
+    def _read_sidecar_spy(shard_index, token):
+        read_sidecar_calls[0] += 1
+        if read_sidecar_calls[0] == 1:
+            return hf_cache.ShardCacheMeta(**initial_head)
+        else:  # Second call (during retry)
+            return hf_cache.ShardCacheMeta(**retried_head)
+
+    monkeypatch.setattr(hf_cache, "_read_sidecar", _read_sidecar_spy)
+
+    def _hf_download_spy(repo, filename, token):
+        if filename.endswith(".json"):
+            # Return initial head sidecar for first fetch
+            p = tmp_path / "sc.json"
+            p.write_text(__import__("json").dumps(initial_head))
+            return str(p)
+        return str(head)
+
+    monkeypatch.setattr(hf_cache, "_hf_download", _hf_download_spy)
+
+    # FakeApi that fails on first call with 412, succeeds on retry
+    fake = _FakeApi(fail_once_with_412=True)
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+
+    meta = hf_cache.push_shard_cache(0, local, model_name="m", status="partial", token="t")
+
+    # After 412 retry, generation should be retried_head.generation + 1 = 5 + 1 = 6
+    assert meta.generation == 6
+    # Verify create_commit was called twice (first failed, second succeeded)
+    assert fake._create_commit_called == 2
+    # Verify final commit succeeded
+    assert len(fake.commits) == 1
