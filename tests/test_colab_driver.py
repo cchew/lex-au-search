@@ -392,3 +392,23 @@ def test_build_run_wrapper_settles_exitcode_atomically(tmp_path):
             break
         time.sleep(0.05)
     assert ec.read_text() == "7"
+
+
+def test_exec_sync_forwards_command_and_returns_tuple(monkeypatch):
+    import colab_driver as cd
+    seen = {}
+    class _R:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+    def _fake_colab(*args, timeout, input_str=None):
+        seen["args"] = args
+        seen["input"] = input_str
+        seen["timeout"] = timeout
+        return _R()
+    monkeypatch.setattr(cd, "_colab", _fake_colab)
+    rc, out, err = cd.exec_sync("sess-1", "echo hi", timeout=42)
+    assert (rc, out, err) == (0, "ok", "")
+    assert seen["args"] == ("exec", "-s", "sess-1")
+    assert seen["input"] == "echo hi"
+    assert seen["timeout"] == 42

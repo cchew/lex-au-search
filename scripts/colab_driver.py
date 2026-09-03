@@ -265,6 +265,14 @@ def tail_log(name: str, log_path: str = "job.log", n: int = 50) -> str:
     return result.stdout
 
 
+def exec_sync(name: str, command: str, timeout: int = 180) -> tuple[int, str, str]:
+    """Run `command` on the session's VM synchronously; return
+    (returncode, stdout, stderr). For short remote calls (an HF push trigger),
+    not for the long-running ingest job (use run_background for that)."""
+    r = _colab("exec", "-s", name, timeout=timeout, input_str=command)
+    return (r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip())
+
+
 def download(name: str, remote_path: str, local_path: str) -> bool:
     """colab download resolves remote_path literally, not relative to the
     exec kernel's cwd (confirmed /content on a stock Colab image, 2026-08-04)
