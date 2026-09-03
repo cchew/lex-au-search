@@ -123,8 +123,8 @@ class RunPodBackend(IngestBackend):
         self._lock_fh = fh
 
     # ------------------------------------------------------------------- ssh
-    def _ssh(self, remote: str, *, check: bool = True):
-        cmd = [
+    def _ssh_base(self) -> list[str]:
+        return [
             "ssh",
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
@@ -134,8 +134,10 @@ class RunPodBackend(IngestBackend):
             "-i", os.path.expanduser(self.ssh_key),
             f"root@{self._ip}",
             "-p", str(self._port),
-            remote,
         ]
+
+    def _ssh(self, remote: str, *, check: bool = True):
+        cmd = [*self._ssh_base(), remote]
         res = self._run(cmd, capture_output=True, text=True)
         if check and getattr(res, "returncode", 0) != 0:
             raise RuntimeError(
@@ -148,6 +150,16 @@ class RunPodBackend(IngestBackend):
         """Run a remote command, return its stdout (stripped). Raises on
         non-zero exit."""
         return (getattr(self._ssh(remote), "stdout", "") or "").strip()
+
+    def _write_hf_token(self, token: str) -> None:
+        """Pipe an HF token to ~/.cache/huggingface/token (0600) via ssh stdin.
+        The token is passed on stdin, never on argv, so it does not leak into
+        the pod's process list or any command echo."""
+        cmd = [*self._ssh_base(),
+               "sh -c 'umask 077; mkdir -p ~/.cache/huggingface; cat > ~/.cache/huggingface/token'"]
+        res = self._run(cmd, input=token, text=True, capture_output=True)
+        if getattr(res, "returncode", 0) != 0:
+            raise RuntimeError("failed to write HF token to the pod")
 
     # -------------------------------------------------------------- prepare()
     def prepare(self) -> None:
@@ -208,6 +220,21 @@ class RunPodBackend(IngestBackend):
                 file=sys.stderr,
             )
             raise
+
+        # 6b-token: push the HF cache-write token to the pod (both the fresh and
+        # --reuse-pod paths). Piped via ssh stdin by _write_hf_token, never on
+        # argv. Without it a read-only smoke can still run, but any shard-cache
+        # push to HF will fail.
+        token = os.environ.get("HF_CACHE_WRITE_TOKEN")
+        if token:
+            self._write_hf_token(token)
+        else:
+            print(
+                "[runpod] HF_CACHE_WRITE_TOKEN is not set; the pod has no HF "
+                "token. A read-only smoke can still run, but pushing shard "
+                "caches to Hugging Face will fail.",
+                file=sys.stderr,
+            )
 
         # 6c: fresh pod only - clone the repo and run the one-time env setup.
         if not reusing:

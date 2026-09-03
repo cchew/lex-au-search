@@ -41,6 +41,10 @@ def _be(tmp_path, rd, **kw):
     return be
 
 
+def _make_runpod_backend(tmp_path, **kw):
+    return _be(tmp_path, _FakeRD(), **kw)
+
+
 def test_prepare_refuses_on_unrelated_running_lexau_pod(tmp_path):
     rd = _FakeRD(pods=[{"id": "other", "name": "lexau-ingest-someoneelse", "desiredStatus": "RUNNING"}])
     be = _be(tmp_path, rd)
@@ -648,3 +652,30 @@ def test_upload_seed_uses_rsync_not_scp(tmp_path, monkeypatch):
     monkeypatch.setattr(be, "_ssh_check", lambda *_: "3")   # remote row count
     assert be._upload_seed("~/lex-au-search/run/shard_000", seed) is None
     assert "rsync" in used
+
+
+def test_ssh_base_has_no_remote_command(tmp_path):
+    be = _make_runpod_backend(tmp_path)  # existing helper in this file
+    be._ip, be._port = "1.2.3.4", "22"
+    base = be._ssh_base()
+    assert base[0] == "ssh"
+    assert base[-1] == "22" and base[-2] == "-p"
+    assert "root@1.2.3.4" in base
+    # no shell command trailing
+    assert not any(tok.startswith("python -m") or "cat >" in tok for tok in base)
+
+
+def test_write_hf_token_pipes_via_stdin_not_argv(tmp_path, monkeypatch):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    captured = {}
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["input"] = kw.get("input")
+        class _R: returncode = 0
+        return _R()
+    monkeypatch.setattr(be, "_run", _fake_run)
+    be._write_hf_token("hf_secretvalue")
+    assert "hf_secretvalue" not in " ".join(captured["cmd"])
+    assert captured["input"] == "hf_secretvalue"
+    assert "cat > ~/.cache/huggingface/token" in " ".join(captured["cmd"])
