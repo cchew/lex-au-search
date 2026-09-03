@@ -66,3 +66,83 @@ def test_check_model_ok_and_mismatch(monkeypatch, tmp_path):
     v = hf_cache.check_model(0, "new-model", token=None)
     assert isinstance(v, hf_cache.Mismatch)
     assert v.old == "old-model" and v.new == "new-model"
+
+
+import hashlib
+import sqlite3
+from huggingface_hub.utils import EntryNotFoundError
+
+
+def _make_db(path, rows):
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE embed_cache (id TEXT PRIMARY KEY, vector BLOB NOT NULL)")
+    conn.executemany("INSERT INTO embed_cache VALUES (?, ?)",
+                     [(f"id{i}", b"\x00\x00\x00\x00") for i in range(rows)])
+    conn.commit()
+    conn.close()
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    h.update(Path(path).read_bytes())
+    return h.hexdigest()
+
+
+def _wire_hf(monkeypatch, db_path, sidecar_dict):
+    def _dl(repo, filename, token):
+        if filename.endswith(".json"):
+            p = Path(db_path).parent / "sc.json"
+            p.write_text(__import__("json").dumps(sidecar_dict))
+            return str(p)
+        return str(db_path)
+    monkeypatch.setattr(hf_cache, "_hf_download", _dl)
+
+
+def test_fetch_happy_path(tmp_path, monkeypatch):
+    src = tmp_path / "src.db"
+    _make_db(src, 5)
+    sidecar = {"model_name": "m", "row_count": 5, "generation": 3,
+               "updated_at": "t", "sha256": _sha256(src), "status": "partial"}
+    _wire_hf(monkeypatch, src, sidecar)
+    dest = tmp_path / "work"
+    dest.mkdir()
+    meta = hf_cache.fetch_shard_cache(0, dest, token=None, expect_model="m", seed_as="shard_cache_seed.db")
+    assert meta.row_count == 5 and meta.generation == 3
+    assert (dest / "shard_cache_seed.db").exists()
+
+
+def test_fetch_cold_returns_none(tmp_path, monkeypatch):
+    def _dl(repo, filename, token):
+        raise EntryNotFoundError("nope")
+    monkeypatch.setattr(hf_cache, "_hf_download", _dl)
+    assert hf_cache.fetch_shard_cache(0, tmp_path, token=None) is None
+
+
+def test_fetch_sha256_mismatch_raises(tmp_path, monkeypatch):
+    src = tmp_path / "src.db"
+    _make_db(src, 5)
+    sidecar = {"model_name": "m", "row_count": 5, "generation": 1,
+               "updated_at": "t", "sha256": "deadbeef", "status": "partial"}
+    _wire_hf(monkeypatch, src, sidecar)
+    with pytest.raises(hf_cache.HfCacheCorrupt):
+        hf_cache.fetch_shard_cache(0, tmp_path, token=None)
+
+
+def test_fetch_row_count_mismatch_raises(tmp_path, monkeypatch):
+    src = tmp_path / "src.db"
+    _make_db(src, 3)
+    sidecar = {"model_name": "m", "row_count": 99, "generation": 1,
+               "updated_at": "t", "sha256": _sha256(src), "status": "partial"}
+    _wire_hf(monkeypatch, src, sidecar)
+    with pytest.raises(hf_cache.HfCacheCorrupt):
+        hf_cache.fetch_shard_cache(0, tmp_path, token=None)
+
+
+def test_fetch_model_mismatch_raises(tmp_path, monkeypatch):
+    src = tmp_path / "src.db"
+    _make_db(src, 5)
+    sidecar = {"model_name": "old", "row_count": 5, "generation": 1,
+               "updated_at": "t", "sha256": _sha256(src), "status": "partial"}
+    _wire_hf(monkeypatch, src, sidecar)
+    with pytest.raises(hf_cache.HfCacheModelMismatch):
+        hf_cache.fetch_shard_cache(0, tmp_path, token=None, expect_model="new")

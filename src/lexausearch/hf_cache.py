@@ -134,3 +134,46 @@ def check_model(shard_index: int, current_model: str, *, token: str | None) -> M
     if meta.model_name == current_model:
         return Ok()
     return Mismatch(old=meta.model_name, new=current_model)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _row_count(db_path: Path) -> int:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def fetch_shard_cache(shard_index: int, dest: Path, *, token: str | None,
+                      expect_model: str | None = None,
+                      seed_as: str | None = None) -> ShardCacheMeta | None:
+    meta = _read_sidecar(shard_index, token)
+    if meta is None:
+        return None
+    if expect_model is not None and meta.model_name != expect_model:
+        raise HfCacheModelMismatch(
+            f"shard {shard_index} HF cache model {meta.model_name!r} != expected {expect_model!r}"
+        )
+    try:
+        db_src = _hf_download(HF_CACHE_REPO, _shard_db_name(shard_index), token)
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        return None
+    db_src = Path(db_src)
+    if _sha256_file(db_src) != meta.sha256:
+        raise HfCacheCorrupt(f"shard {shard_index} DB sha256 mismatch vs sidecar")
+    actual = _row_count(db_src)
+    if actual != meta.row_count:
+        raise HfCacheCorrupt(
+            f"shard {shard_index} DB has {actual} rows, sidecar says {meta.row_count}"
+        )
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / (seed_as or _shard_db_name(shard_index))
+    shutil.copyfile(db_src, target)
+    return meta
