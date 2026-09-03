@@ -1,6 +1,9 @@
 # tests/test_backends_colab.py
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
@@ -27,6 +30,7 @@ class _Recorder:
 
     def upload(self, name, local, remote):
         self.calls.append(("upload", name, remote))
+        self.last_upload_local = local
         return True
 
     def run_background(self, name, cmd):
@@ -67,6 +71,13 @@ class _Recorder:
 
     def _release_orphaned_assignments(self):
         self.calls.append(("_release_orphaned_assignments",))
+
+
+class _FailUpload(_Recorder):
+    def upload(self, name, local, remote):
+        self.calls.append(("upload", name, remote))
+        self.last_upload_local = local
+        return False
 
 
 def _install_recorder(monkeypatch, rec):
@@ -143,11 +154,6 @@ def test_token_uploaded_when_env_set(monkeypatch, tmp_path):
 
 
 def test_token_upload_failure_fails_shard(monkeypatch, tmp_path):
-    class _FailUpload(_Recorder):
-        def upload(self, name, local, remote):
-            self.calls.append(("upload", name, remote))
-            return False
-
     rec = _FailUpload(poll_sequence=["done"])
     _install_recorder(monkeypatch, rec)
     monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
@@ -159,6 +165,21 @@ def test_token_upload_failure_fails_shard(monkeypatch, tmp_path):
     assert "token upload" in res.diagnosis.lower()
     assert not any(c[0] == "run_background" for c in rec.calls)
     assert ("stop_session", "lexau-shard-0") in rec.calls
+
+
+@pytest.mark.parametrize("recorder_cls", [_Recorder, _FailUpload])
+def test_local_token_file_is_cleaned_up(monkeypatch, tmp_path, recorder_cls):
+    # The 0600 temp file holding HF_CACHE_WRITE_TOKEN must be unlinked locally
+    # whether cd.upload succeeds (_Recorder) or fails (_FailUpload).
+    rec = recorder_cls(poll_sequence=["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setenv("HF_CACHE_WRITE_TOKEN", "hf_x")
+
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, SeedMode.HF)
+
+    assert rec.last_upload_local  # the local path was actually passed to cd.upload
+    assert not os.path.exists(rec.last_upload_local)
 
 
 def test_session_lost_returns_failure_without_checkpoint_push(monkeypatch, tmp_path):

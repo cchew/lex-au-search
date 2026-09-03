@@ -32,7 +32,8 @@ REPO_URL = "https://github.com/cchew/lex-au-search.git"
 # ~5min at POLL_INTERVAL_S=30s - bounds the worst-case lost work on a kill
 # (confirmed 2026-08-21: free-tier sessions get pruned at ~60min regardless
 # of resource usage or keep-alive health) to one checkpoint interval, not
-# the whole run. See checkpoint_cache()'s docstring in colab_driver.py.
+# the whole run. Each interval the VM pushes its live embed cache to HF via
+# _push_checkpoint().
 CHECKPOINT_INTERVAL_POLLS = 10
 
 
@@ -112,10 +113,14 @@ class ColabBackend(IngestBackend):
                     tf.write(token)
                     tok_path = tf.name
                 os.chmod(tok_path, 0o600)
-                if not cd.upload(name, tok_path, "/content/.hf_token"):
-                    print(f"[shard {index}] HF token upload to the VM failed", file=sys.stderr)
-                    return fail("HF token upload to the VM failed")
+                try:
+                    if not cd.upload(name, tok_path, "/content/.hf_token"):
+                        print(f"[shard {index}] HF token upload to the VM failed", file=sys.stderr)
+                        return fail("HF token upload to the VM failed")
+                finally:
+                    os.unlink(tok_path)
 
+            overwrite = seed_mode is SeedMode.SEEDLESS_OVERWRITE
             fetch_line = ""
             if seed_mode is SeedMode.HF:
                 fetch_line = (
@@ -141,9 +146,7 @@ class ColabBackend(IngestBackend):
                     print(f"[shard {index}] {cd.sample_resources(name)}", file=sys.stderr)
                     poll_count += 1
                     if poll_count % CHECKPOINT_INTERVAL_POLLS == 0:
-                        self._push_checkpoint(
-                            name, index, seed_mode is SeedMode.SEEDLESS_OVERWRITE
-                        )
+                        self._push_checkpoint(name, index, overwrite)
                     continue
                 if status == "done":
                     break
@@ -170,9 +173,7 @@ class ColabBackend(IngestBackend):
             if not (ok_zip and ok_cache):
                 print(f"[shard {index}] download failed", file=sys.stderr)
                 return fail("download failed")
-            self._push_checkpoint(
-                name, index, seed_mode is SeedMode.SEEDLESS_OVERWRITE, status="complete"
-            )
+            self._push_checkpoint(name, index, overwrite, status="complete")
             print(f"[shard {index}] done -> {zip_path}", file=sys.stderr)
             return ShardResult(index, True, zip_path, cache_zip_path, "")
         except Exception as e:  # noqa: BLE001 - one shard's failure must not crash the run
