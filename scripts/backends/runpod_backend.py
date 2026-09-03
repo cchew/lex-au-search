@@ -18,20 +18,17 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import runpod_driver as _runpod_driver
-from lexausearch.cache import merge_cache_files
 from lexausearch.models import DENSE_MODEL
 
 from backends.base import (
     IngestBackend,
     SeedMode,
     ShardResult,
-    checkpoint_cache_path,
     shard_paths,
 )
 
@@ -109,6 +106,11 @@ class RunPodBackend(IngestBackend):
         # Absolute wall-clock deadline for a single shard's poll loop. Computed
         # per shard as monotonic() + RUN_MAX_S unless a test pins it here.
         self._run_deadline: float | None = None
+        # Set per shard in run_shard() from the SeedMode; read by every hf_cache
+        # push. True => SEEDLESS_OVERWRITE replaces this shard's HF file rather
+        # than pull-merging into it. Defaulted here so _poll_to_terminal and the
+        # push helpers are safe to call directly in tests without run_shard().
+        self._overwrite: bool = False
 
     # ------------------------------------------------------------------ locks
     def _acquire_lock(self) -> None:
@@ -383,7 +385,6 @@ class RunPodBackend(IngestBackend):
         # this shard's HF file rather than pull-merging into it.
         self._overwrite = seed_mode is SeedMode.SEEDLESS_OVERWRITE
         work = f"~/lex-au-search/run/shard_{index:03d}"
-        ckpt = checkpoint_cache_path(self.shards_dir, index)
 
         # --- Step 0: GPU-idle guard + clean per-shard workdir -------------
         try:
@@ -396,7 +397,7 @@ class RunPodBackend(IngestBackend):
                     )
             self._ssh(f"rm -rf {work} && mkdir -p {work}")
         except _SSH_ERRORS:
-            return self._give_up_unreachable(index, work, ckpt)
+            return self._give_up_unreachable(index, work)
 
         # --- Step 1: seed shard_cache_seed.db from HF (HF mode only) -----
         # The pod pulls its own seed - no laptop->pod upload. Exit 0 (incl.
@@ -433,8 +434,6 @@ class RunPodBackend(IngestBackend):
         """Fire the detached ingest job, then prove it actually started.
         Returns a failed ShardResult when the pod is unreachable or no
         job.log appeared; None means the poll loop should proceed."""
-        ckpt = checkpoint_cache_path(self.shards_dir, index)
-
         # Every token here is load-bearing and asserted verbatim by the tests:
         # `-f` + DEVNULL on both streams so ssh returns immediately; the
         # `( ... ) &` subshell so the job outlives the connection; `setsid -w`
@@ -478,7 +477,7 @@ class RunPodBackend(IngestBackend):
                 check=False,
             )
         except _SSH_ERRORS:
-            return self._give_up_unreachable(index, work, ckpt)
+            return self._give_up_unreachable(index, work)
         if "STARTED" not in (getattr(started, "stdout", "") or ""):
             return ShardResult(
                 index,
@@ -492,10 +491,11 @@ class RunPodBackend(IngestBackend):
     def _poll_to_terminal(
         self, index: int, work: str, seed_mode: SeedMode
     ) -> ShardResult:
-        """Poll job.exitcode until the shard reaches a terminal state, pulling
-        best-effort checkpoints along the way. `seed_mode` (mirrored in
-        `self._overwrite`) is consumed by the Task 15 checkpoint pushes."""
-        ckpt = checkpoint_cache_path(self.shards_dir, index)
+        """Poll job.exitcode until the shard reaches a terminal state, pushing
+        best-effort `--status partial` checkpoints to HF along the way. On a
+        clean exit it pushes `--status complete` after the zips come back.
+        `seed_mode` is accepted for call-site symmetry with `run_shard`; the
+        push path reads `self._overwrite` (set per shard in `run_shard`)."""
         run_deadline = (
             self._run_deadline
             if self._run_deadline is not None
@@ -506,7 +506,7 @@ class RunPodBackend(IngestBackend):
             try:
                 code = self._read_exit_code(work)
             except _SSH_ERRORS:
-                verdict = self._handle_ssh_failure(index, work, ckpt)
+                verdict = self._handle_ssh_failure(index, work)
                 if verdict is not None:
                     return verdict
                 continue
@@ -516,14 +516,12 @@ class RunPodBackend(IngestBackend):
                 self._log_trend(work)
                 poll_count += 1
                 if poll_count % self.CHECKPOINT_INTERVAL_POLLS == 0:
-                    # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
-                    self._safe_snapshot(index, work, ckpt)
+                    self._safe_push_checkpoint(index, work, self._overwrite)
                 if time.monotonic() >= run_deadline:
-                    # Reachable but never terminal. Salvage the cache and hand
-                    # back a failed shard; the pod stays up for teardown to deal
-                    # with (run_shard never terminates).
-                    # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
-                    self._safe_snapshot(index, work, ckpt)
+                    # Reachable but never terminal. Push a final checkpoint and
+                    # hand back a failed shard; the pod stays up for teardown to
+                    # deal with (run_shard never terminates).
+                    self._safe_push_checkpoint(index, work, self._overwrite)
                     return ShardResult(
                         index,
                         False,
@@ -550,8 +548,8 @@ class RunPodBackend(IngestBackend):
                     self._scp_back(f"{work}/shard_cache.zip", cache_zip)
                 except _SSH_ERRORS as e:
                     # The job succeeded remotely but we could not pull the
-                    # outputs. One shard's failure must not crash the run;
-                    # the accumulator already holds the last snapshot.
+                    # outputs. One shard's failure must not crash the run; the
+                    # last checkpoint push holds progress on HF.
                     return ShardResult(
                         index,
                         False,
@@ -559,11 +557,16 @@ class RunPodBackend(IngestBackend):
                         None,
                         f"failed to download shard outputs: {e}",
                     )
+                # Clean exit with the zips in hand: mark the HF file complete.
+                self._ssh(
+                    self._push_cmd(index, work, "complete", self._overwrite),
+                    check=False,
+                )
                 return ShardResult(index, True, storage_zip, cache_zip, "")
 
-            # Non-zero terminal: salvage whatever the cache reached, then report.
-            # TODO(hf-cache plan Task 15): _safe_push_checkpoint here.
-            self._safe_snapshot(index, work, ckpt)
+            # Non-zero terminal: checkpoint whatever the cache reached, then
+            # report.
+            self._safe_push_checkpoint(index, work, self._overwrite)
             try:
                 diagnosis = self._tail_job_log(work)
             except _SSH_ERRORS:
@@ -606,38 +609,25 @@ class RunPodBackend(IngestBackend):
         except Exception:  # noqa: BLE001 - trend logging must never break the loop
             pass
 
-    def _snapshot(self, index: int, work: str, ckpt: Path) -> None:
-        """Consistent copy of the live remote cache -> fold into the local
-        accumulator at `ckpt`. Raises on any SSH/scp failure."""
-        # `work` starts with `~`, which the shell expands for `cd` but Python's
-        # sqlite3.connect() does NOT - interpolating it into the -c literal
-        # writes snap.db to a literal ./~/... path and the scp-back then fails
-        # "No such file". cd in first, use relative names.
-        self._ssh(
-            f"cd {work} && python3 -c \"import sqlite3; "
-            "sqlite3.connect('shard_cache.db')"
-            ".backup(sqlite3.connect('snap.db'))\"",
-            check=False,
-        )
-        with tempfile.TemporaryDirectory() as td:
-            snap = Path(td) / "snap.db"
-            self._scp_back(f"{work}/snap.db", snap)
-            self.shards_dir.mkdir(parents=True, exist_ok=True)
-            rows = merge_cache_files([snap], ckpt)
-        print(
-            f"[runpod] shard {index}: snapshot merged ({rows} rows read)",
-            file=sys.stderr,
-        )
+    def _push_cmd(self, index: int, work: str, status: str, overwrite: bool) -> str:
+        cmd = (f"python -m lexausearch.hf_cache push {index} "
+               f"--db {work}/shard_cache.db --status {status} --live "
+               f"--model {DENSE_MODEL}")
+        return cmd + (" --overwrite" if overwrite else "")
 
-    def _safe_snapshot(self, index: int, work: str, ckpt: Path) -> None:
+    def _safe_push_checkpoint(
+        self, index: int, work: str, overwrite: bool = False
+    ) -> None:
         try:
-            self._snapshot(index, work, ckpt)
-        except Exception as e:  # noqa: BLE001 - accumulator merge is best-effort
-            print(
-                f"[runpod] shard {index}: snapshot failed: {e}", file=sys.stderr
-            )
+            r = self._ssh(self._push_cmd(index, work, "partial", overwrite), check=False)
+            if getattr(r, "returncode", 0) != 0:
+                print(f"[runpod] shard {index} checkpoint push failed (non-fatal): "
+                      f"{getattr(r, 'stderr', '')}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[runpod] shard {index} checkpoint push errored (non-fatal): {e}",
+                  file=sys.stderr)
 
-    def _handle_ssh_failure(self, index: int, work: str, ckpt: Path):
+    def _handle_ssh_failure(self, index: int, work: str):
         """One recovery cycle after an SSH error in the poll loop. Returns a
         failed ShardResult when the run should be abandoned, or None to keep
         polling. Never terminates the pod - that is teardown()'s job."""
@@ -648,14 +638,12 @@ class RunPodBackend(IngestBackend):
         except Exception:  # noqa: BLE001 - API error == cannot confirm RUNNING
             status = None
         if status != "RUNNING" or time.monotonic() >= self._deadline_s:
-            return self._give_up_unreachable(index, work, ckpt)
+            return self._give_up_unreachable(index, work)
         self._sleep(self.POLL_INTERVAL_S)
         return None
 
-    def _give_up_unreachable(
-        self, index: int, work: str, ckpt: Path
-    ) -> ShardResult:
-        self._safe_snapshot(index, work, ckpt)
+    def _give_up_unreachable(self, index: int, work: str) -> ShardResult:
+        self._safe_push_checkpoint(index, work, self._overwrite)
         return ShardResult(index, False, None, None, "pod/host unreachable")
 
     # --------------------------------------------------------- Task 9: scp

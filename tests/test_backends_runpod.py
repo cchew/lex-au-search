@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from backends.base import SeedMode, checkpoint_cache_path
+from backends.base import SeedMode
 from backends.runpod_backend import RunPodBackend
 
 
@@ -340,26 +340,50 @@ def test_poll_treats_absent_or_empty_exitcode_as_running(tmp_path):
     assert polls == []  # all three polls consumed; empties were "running", not "failed"
 
 
-def test_nonzero_exitcode_pulls_final_snapshot_and_sets_diagnosis(tmp_path, monkeypatch):
-    rd = _FakeRD()
-    be = _prepared(tmp_path, rd)
-    merged = []
-    monkeypatch.setattr("backends.runpod_backend.merge_cache_files", lambda srcs, target: merged.append(target))
-    def fake_run(cmd, **kw):
-        s = cmd[-1]
-        if _is_start_probe(s):
-            return _started("STARTED")
-        if "cat" in s and "job.exitcode" in s:
-            return types.SimpleNamespace(returncode=0, stdout="1", stderr="")
-        if "tail -n 200" in s:
-            return types.SimpleNamespace(returncode=0, stdout="...boom...", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    be._sleep = lambda *_: None
-    res = be.run_shard(0, 300, SeedMode.HF)
-    assert res.ok is False
-    assert "boom" in res.diagnosis
-    assert merged and merged[-1] == checkpoint_cache_path(tmp_path, 0)
+def test_nonzero_exitcode_pushes_partial_and_sets_diagnosis(tmp_path, monkeypatch):
+    from backends.base import SeedMode
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    pushes = []
+    class _OK:
+        returncode = 0; stdout = ""; stderr = ""
+    def _ssh(remote, check=True):
+        if "hf_cache push" in remote:
+            pushes.append(remote)
+        return _OK()
+    monkeypatch.setattr(be, "_ssh", _ssh)
+    # drive the poll loop to a non-zero terminal exit code + a job.log tail
+    monkeypatch.setattr(be, "_read_exit_code", lambda work: 1)
+    monkeypatch.setattr(be, "_tail_job_log", lambda work, n=200: "boom")
+    res = be._poll_to_terminal(0, "~/w", SeedMode.HF)
+    assert res.ok is False and "boom" in res.diagnosis
+    assert any("--status partial" in p for p in pushes)
+
+
+def test_checkpoint_push_is_best_effort(tmp_path, monkeypatch):
+    from backends.base import SeedMode
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    class _FAIL:
+        returncode = 1; stdout = ""; stderr = "hf down"
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: _FAIL())
+    # must not raise
+    be._safe_push_checkpoint(0, "~/w")
+
+
+def test_overwrite_mode_adds_flag_to_pushes(tmp_path, monkeypatch):
+    from backends.base import SeedMode
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    seen = []
+    class _OK:
+        returncode = 0; stdout = ""; stderr = ""
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: seen.append(remote) or _OK())
+    monkeypatch.setattr(be, "_launch_detached", lambda *a, **k: None)
+    monkeypatch.setattr(be, "_read_exit_code", lambda work: 0)
+    monkeypatch.setattr(be, "_scp_back", lambda *a, **k: None)
+    be.run_shard(0, 300, SeedMode.SEEDLESS_OVERWRITE)
+    assert any("hf_cache push" in s and "--overwrite" in s for s in seen)
 
 
 def test_ssh_unreachable_checks_status_and_does_not_terminate_within_bound(tmp_path):
@@ -449,35 +473,6 @@ def test_keep_pod_leaves_pod_and_prints_reuse_hint(tmp_path, capsys):
     assert rd.terminated == []
     assert "--reuse-pod" in capsys.readouterr().out
     assert (tmp_path / ".runpod_pod").exists()
-
-
-def test_snapshot_backup_cds_into_workdir_not_tilde_literal(tmp_path):
-    # `work` is "~/lex-au-search/run/shard_000"; Python's sqlite3.connect() does
-    # not expand `~`. The backup command must `cd` into the workdir (shell
-    # expands it) and use relative db names, else snap.db lands at a literal
-    # ./~/... path and the scp-back fails "No such file".
-    rd = _FakeRD()
-    be = _prepared(tmp_path, rd)
-    seen = []
-    def fake_run(cmd, **kw):
-        s = cmd[-1]
-        seen.append(s)
-        if _is_start_probe(s):
-            return _started("STARTED")
-        if "cat" in s and "job.exitcode" in s:
-            return types.SimpleNamespace(returncode=0, stdout="1", stderr="")
-        if "tail -n 200" in s:
-            return types.SimpleNamespace(returncode=0, stdout="boom", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    be._run = fake_run
-    be._sleep = lambda *_: None
-    be.run_shard(0, 300, SeedMode.HF)
-    backup = next(s for s in seen if "sqlite3" in s and "backup" in s)
-    assert backup.startswith("cd ~/lex-au-search/run/shard_000 &&")
-    assert "connect('shard_cache.db')" in backup
-    assert "connect('snap.db')" in backup
-    # no tilde-prefixed path inside the python -c literal
-    assert "'~/" not in backup
 
 
 def test_scp_base_uses_a_dedicated_connection_not_the_ssh_controlmaster(tmp_path):
