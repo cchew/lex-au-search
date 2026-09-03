@@ -24,6 +24,10 @@ lex-au-search ingest --corpus-dir ../lex-au/repo/corpus/
 lex-au-search serve
 lex-au-search mcp  # requires LEXAU_SEARCH_STORAGE env var
 
+# Sharded-ingest embed caches live on HF (cchew/lex-au-search-embed-cache).
+# One-time: python scripts/bootstrap_hf_cache.py   (needs HF_CACHE_WRITE_TOKEN in .env)
+# Status:   python scripts/check_ingest_status.py
+
 ## Tests
 
 pytest
