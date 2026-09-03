@@ -14,3 +14,4 @@ shards/.runpod_pod.lock
 
 # Superpowers planning docs live in the EA wrapper repo, not here
 docs/superpowers/
+.hf_token
