@@ -118,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--reseed-on-model-mismatch", action="store_true", dest="reseed_on_model_mismatch",
                     help="Non-interactively take the override path on a model-version mismatch: "
                          "run the shard seedless and replace its HF cache under the new model.")
-    ap.add_argument("--hf-cache-repo", default="cchew/lex-au-search-embed-cache", dest="hf_cache_repo",
+    ap.add_argument("--hf-cache-repo", default=hf_cache._DEFAULT_HF_CACHE_REPO, dest="hf_cache_repo",
                     help="HF dataset repo for shard embed caches (point a smoke run at a throwaway).")
     return ap
 

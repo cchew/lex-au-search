@@ -110,6 +110,16 @@ def test_new_runpod_flags_parse():
     assert ns.cloud_type == "SECURE"
 
 
+def test_hf_cache_repo_default_tracks_the_module_constant():
+    # A plain run must not trip the override/env-export branch, which keys off
+    # `args.hf_cache_repo != hf_cache._DEFAULT_HF_CACHE_REPO`. Defaulting the
+    # argparse value to the same constant (not a re-typed literal) is what keeps
+    # the two in lockstep if the constant ever changes.
+    p = rsi._build_parser()
+    ns = p.parse_args(["--total-acts", "10"])
+    assert ns.hf_cache_repo == rsi.hf_cache._DEFAULT_HF_CACHE_REPO
+
+
 def test_reap_terminates_lexau_pods_and_clears_file(tmp_path, monkeypatch, capsys):
     calls = {"terminated": []}
     fake_rd = types.SimpleNamespace(
