@@ -270,3 +270,33 @@ def test_teardown_sweeps_orphans(monkeypatch, tmp_path):
     _install_recorder(monkeypatch, rec)
     ColabBackend(shards_dir=tmp_path, gpu="T4").teardown()
     assert ("_release_orphaned_assignments",) in rec.calls
+
+
+# ---------------------------------- C1: repo override reaches the Colab VM
+
+def test_repo_override_reaches_remote_fetch_and_push(monkeypatch, tmp_path):
+    rec = _Recorder(poll_sequence=["running"] * 10 + ["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+    monkeypatch.delenv("HF_CACHE_WRITE_TOKEN", raising=False)
+    monkeypatch.setenv("LEXAU_HF_CACHE_REPO", "cchew/throwaway")
+
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, SeedMode.HF)
+
+    fetch_seg = rec.last_remote_cmd.split("hf_cache fetch")[1].split(" && ")[0]
+    assert "--repo cchew/throwaway" in fetch_seg
+    pushes = [c[2] for c in rec.calls if c[0] == "exec_sync"]
+    assert pushes and all("--repo cchew/throwaway" in c for c in pushes)
+
+
+def test_no_repo_override_emits_no_repo_flag(monkeypatch, tmp_path):
+    rec = _Recorder(poll_sequence=["running"] * 10 + ["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+    monkeypatch.delenv("HF_CACHE_WRITE_TOKEN", raising=False)
+    monkeypatch.delenv("LEXAU_HF_CACHE_REPO", raising=False)
+
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, SeedMode.HF)
+
+    assert "--repo" not in rec.last_remote_cmd
+    assert not any("--repo" in c[2] for c in rec.calls if c[0] == "exec_sync")

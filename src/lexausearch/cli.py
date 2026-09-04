@@ -229,52 +229,60 @@ def merge_shards_cmd(
 
     from lexausearch import hf_cache
     from lexausearch.models import DENSE_MODEL
-    import tempfile, json as _json
+    import shutil, tempfile, json as _json
 
-    if from_hf:
-        cat = hf_cache.read_catalogue(token=None)
-        if cat is None:
-            raise click.ClickException("--from-hf: no catalogue.json in the HF repo")
-        n = -(-cat.total_acts // cat.shard_size)  # ceil
-        tmp = Path(tempfile.mkdtemp(prefix="mergeshards-hf-"))
-        cache_paths = []
-        sidecars = {}
-        for i in range(n):
-            meta = hf_cache.fetch_shard_cache(i, tmp, token=None,
-                                              seed_as=f"shard_{i:03d}_checkpoint_cache.db")
-            if meta is None:
-                raise click.ClickException(f"--from-hf: shard {i} missing from the HF repo")
-            cache_paths.append(tmp / f"shard_{i:03d}_checkpoint_cache.db")
-            sidecars[i] = meta.model_name
-        expected_model = cat.dense_model
-    else:
-        cache_paths = [Path(p.strip()) for p in shard_cache_paths.split(",")]
-        sidecars = {}
-        for idx, p in enumerate(cache_paths):
-            sc = p.parent / f"{p.stem.replace('_checkpoint_cache', '')}.json"
-            if sc.is_file():
-                sidecars[idx] = _json.loads(sc.read_text())["model_name"]
-        expected_model = DENSE_MODEL
+    # --from-hf pulls every shard's cache DB into a scratch dir (~9GB for the
+    # 11-shard production merge). It must survive until merge_cache_files has
+    # consumed cache_paths, and must not outlive this command either way.
+    tmp: Path | None = None
+    try:
+        if from_hf:
+            cat = hf_cache.read_catalogue(token=None)
+            if cat is None:
+                raise click.ClickException("--from-hf: no catalogue.json in the HF repo")
+            n = -(-cat.total_acts // cat.shard_size)  # ceil
+            tmp = Path(tempfile.mkdtemp(prefix="mergeshards-hf-"))
+            cache_paths = []
+            sidecars = {}
+            for i in range(n):
+                meta = hf_cache.fetch_shard_cache(i, tmp, token=None,
+                                                  seed_as=f"shard_{i:03d}_checkpoint_cache.db")
+                if meta is None:
+                    raise click.ClickException(f"--from-hf: shard {i} missing from the HF repo")
+                cache_paths.append(tmp / f"shard_{i:03d}_checkpoint_cache.db")
+                sidecars[i] = meta.model_name
+            expected_model = cat.dense_model
+        else:
+            cache_paths = [Path(p.strip()) for p in shard_cache_paths.split(",")]
+            sidecars = {}
+            for idx, p in enumerate(cache_paths):
+                sc = p.parent / f"{p.stem.replace('_checkpoint_cache', '')}.json"
+                if sc.is_file():
+                    sidecars[idx] = _json.loads(sc.read_text())["model_name"]
+            expected_model = DENSE_MODEL
 
-    if len(sidecars) == len(cache_paths) and sidecars:  # all present -> guard active
-        bad = [i for i, m in sidecars.items() if m != expected_model]
-        if bad:
-            raise click.ClickException(
-                f"refusing to merge: shards {bad} built with a model other than "
-                f"{expected_model!r}. Re-run those shards under {expected_model!r}."
-            )
+        if len(sidecars) == len(cache_paths) and sidecars:  # all present -> guard active
+            bad = [i for i, m in sidecars.items() if m != expected_model]
+            if bad:
+                raise click.ClickException(
+                    f"refusing to merge: shards {bad} built with a model other than "
+                    f"{expected_model!r}. Re-run those shards under {expected_model!r}."
+                )
 
-    storage_dirs = [Path(p.strip()) for p in shard_storage_dirs.split(",")]
+        storage_dirs = [Path(p.strip()) for p in shard_storage_dirs.split(",")]
 
-    click.echo(f"Merging {len(storage_dirs)} shard(s) into {output_storage_dir} ...")
-    shard_clients = [QdrantClient(path=str(d)) for d in storage_dirs]
-    output_client = QdrantClient(path=str(output_storage_dir))
-    totals = merge_shard_clients(shard_clients, output_client)
-    click.echo(f"  {totals['sections']} chunks + {totals['acts']} Act records merged.")
+        click.echo(f"Merging {len(storage_dirs)} shard(s) into {output_storage_dir} ...")
+        shard_clients = [QdrantClient(path=str(d)) for d in storage_dirs]
+        output_client = QdrantClient(path=str(output_storage_dir))
+        totals = merge_shard_clients(shard_clients, output_client)
+        click.echo(f"  {totals['sections']} chunks + {totals['acts']} Act records merged.")
 
-    click.echo(f"Merging {len(cache_paths)} shard cache(s) into {output_cache_path} ...")
-    rows = merge_cache_files(cache_paths, output_cache_path)
-    click.echo(f"  {rows} cache rows merged (deduplicated by content-addressed key).")
+        click.echo(f"Merging {len(cache_paths)} shard cache(s) into {output_cache_path} ...")
+        rows = merge_cache_files(cache_paths, output_cache_path)
+        click.echo(f"  {rows} cache rows merged (deduplicated by content-addressed key).")
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     click.echo("Done.")
 

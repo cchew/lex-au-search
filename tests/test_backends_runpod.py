@@ -572,3 +572,62 @@ def test_seedmode_overwrite_skips_fetch(tmp_path, monkeypatch):
     be.run_shard(0, 300, SeedMode.SEEDLESS_OVERWRITE)
     assert not any("hf_cache fetch" in c for c in calls)
     assert be._overwrite is True
+
+
+# ---------------------------------- C1: repo override reaches the compute VM
+
+def _repo_override_calls(tmp_path, monkeypatch, seed_mode=SeedMode.HF):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    calls = []
+
+    class _OK:
+        returncode = 0; stdout = ""; stderr = ""
+
+    monkeypatch.setattr(be, "_gpu_pids", lambda: "")
+    monkeypatch.setattr(be, "_ssh", lambda remote, check=True: calls.append(remote) or _OK())
+    monkeypatch.setattr(be, "_launch_detached", lambda *a, **k: None)
+    monkeypatch.setattr(be, "_read_exit_code", lambda work: 0)
+    monkeypatch.setattr(be, "_scp_back", lambda *a, **k: None)
+    be.run_shard(0, 300, seed_mode)
+    return calls
+
+
+def test_repo_override_reaches_remote_fetch_and_push(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEXAU_HF_CACHE_REPO", "cchew/throwaway")
+    calls = _repo_override_calls(tmp_path, monkeypatch)
+    fetches = [c for c in calls if "hf_cache fetch" in c]
+    pushes = [c for c in calls if "hf_cache push" in c]
+    assert fetches and all("--repo cchew/throwaway" in c for c in fetches)
+    assert pushes and all("--repo cchew/throwaway" in c for c in pushes)
+
+
+def test_no_repo_override_emits_no_repo_flag(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEXAU_HF_CACHE_REPO", raising=False)
+    calls = _repo_override_calls(tmp_path, monkeypatch)
+    assert any("hf_cache fetch" in c for c in calls)
+    assert not any("--repo" in c for c in calls)
+
+
+# ------------------------- I3: the terminal --status complete push must not raise
+
+def test_terminal_complete_push_is_best_effort(tmp_path, monkeypatch):
+    be = _make_runpod_backend(tmp_path)
+    be._ip, be._port = "1.2.3.4", "22"
+    pushed = []
+
+    class _OK:
+        returncode = 0; stdout = ""; stderr = ""
+
+    def _ssh(remote, check=True):
+        if "hf_cache push" in remote:
+            pushed.append(remote)
+            raise OSError("ssh binary vanished")
+        return _OK()
+
+    monkeypatch.setattr(be, "_ssh", _ssh)
+    monkeypatch.setattr(be, "_read_exit_code", lambda work: 0)
+    monkeypatch.setattr(be, "_scp_back", lambda *a, **k: None)
+    res = be._poll_to_terminal(0, "~/w", SeedMode.HF)
+    assert res.ok is True  # zips are on disk; a push failure must not kill the shard
+    assert any("--status complete" in p for p in pushed)

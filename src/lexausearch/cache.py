@@ -120,16 +120,25 @@ def merge_cache_files(shard_cache_paths: list[Path | str], output_cache_path: Pa
     """Merge multiple SQLite embed_cache.db files into one. Content-addressed
     UUID5 keys mean the same text embedded in two shards collapses to one
     row via INSERT OR REPLACE. Returns the number of (pre-dedup) rows read."""
+    # Every connection is closed in a `finally`: this runs on every VM push
+    # path, and a raise mid-loop (corrupt shard DB, disk error) previously
+    # leaked both the per-shard and the output connection.
+    # NOTE: `fetchall()` still materialises one shard's rows in memory; that is
+    # a known cost, deliberately unchanged here.
     output = EmbedCache(output_cache_path)
     total_rows_read = 0
-    for shard_path in shard_cache_paths:
-        conn = sqlite3.connect(str(shard_path))
-        rows = conn.execute("SELECT id, vector FROM embed_cache").fetchall()
-        conn.close()
-        output._conn.executemany(
-            "INSERT OR REPLACE INTO embed_cache VALUES (?, ?)", rows
-        )
-        total_rows_read += len(rows)
-    output._conn.commit()
-    output._conn.close()
+    try:
+        for shard_path in shard_cache_paths:
+            conn = sqlite3.connect(str(shard_path))
+            try:
+                rows = conn.execute("SELECT id, vector FROM embed_cache").fetchall()
+            finally:
+                conn.close()
+            output._conn.executemany(
+                "INSERT OR REPLACE INTO embed_cache VALUES (?, ?)", rows
+            )
+            total_rows_read += len(rows)
+        output._conn.commit()
+    finally:
+        output._conn.close()
     return total_rows_read

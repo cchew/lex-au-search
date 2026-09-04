@@ -35,3 +35,47 @@ def test_no_hf_flag_skips_section(tmp_path):
     )
     assert r.returncode == 0
     assert "hf cache" not in r.stdout.lower()
+
+
+def test_hf_section_reports_updated_at_and_local_stale(tmp_path, monkeypatch, capsys):
+    """Spec 6.2 columns: shard | generation | row_count | model | status |
+    updated_at | local_stale?"""
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    import check_ingest_status as cis
+    from lexausearch import hf_cache
+
+    monkeypatch.setattr(hf_cache, "read_catalogue",
+                        lambda token: hf_cache.Catalogue("m", 300, 600, {}))
+    metas = {
+        0: hf_cache.ShardCacheMeta("m", 12, 5, "2026-09-03T01:02:03Z", "x", "partial"),
+        1: None,
+    }
+    monkeypatch.setattr(hf_cache, "_read_sidecar", lambda i, t: metas[i])
+    # shard 0's local marker is behind HF -> stale
+    monkeypatch.setattr(hf_cache, "_local_marker_generation", lambda d, i: 3)
+
+    cis.print_hf_section(tmp_path)
+    out = capsys.readouterr().out
+    assert "updated_at" in out and "local_stale?" in out
+    assert "2026-09-03T01:02:03Z" in out
+    # columns: shard gen rows status updated_at local_stale? model
+    row0 = next(l for l in out.splitlines() if l.split()[:1] == ["0"])
+    assert row0.split() == ["0", "5", "12", "partial", "2026-09-03T01:02:03Z", "yes", "m"]
+
+
+def test_hf_section_marks_current_local_marker_not_stale(tmp_path, monkeypatch, capsys):
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    import check_ingest_status as cis
+    from lexausearch import hf_cache
+
+    monkeypatch.setattr(hf_cache, "read_catalogue",
+                        lambda token: hf_cache.Catalogue("m", 300, 300, {}))
+    monkeypatch.setattr(hf_cache, "_read_sidecar",
+                        lambda i, t: hf_cache.ShardCacheMeta("m", 12, 5, "t", "x", "complete"))
+    monkeypatch.setattr(hf_cache, "_local_marker_generation", lambda d, i: 5)
+    cis.print_hf_section(tmp_path)
+    out = capsys.readouterr().out
+    row0 = next(l for l in out.splitlines() if l.split()[:1] == ["0"])
+    assert row0.split()[5] == "no"

@@ -29,6 +29,7 @@ from backends.base import (
     IngestBackend,
     SeedMode,
     ShardResult,
+    hf_repo_flag,
     shard_paths,
 )
 
@@ -408,7 +409,7 @@ class RunPodBackend(IngestBackend):
             fetch = self._ssh(
                 f"cd {work} && python -m lexausearch.hf_cache fetch {index} "
                 f"--dest {work} --seed-as shard_cache_seed.db "
-                f"--expect-model {DENSE_MODEL}",
+                f"--expect-model {DENSE_MODEL}" + hf_repo_flag(),
                 check=False,
             )
             if getattr(fetch, "returncode", 0) != 0:
@@ -558,9 +559,10 @@ class RunPodBackend(IngestBackend):
                         f"failed to download shard outputs: {e}",
                     )
                 # Clean exit with the zips in hand: mark the HF file complete.
-                self._ssh(
-                    self._push_cmd(index, work, "complete", self._overwrite),
-                    check=False,
+                # Best-effort - the shard has already succeeded, so a dead ssh
+                # here must not raise out of the loop and kill the whole run.
+                self._safe_push_checkpoint(
+                    index, work, self._overwrite, status="complete"
                 )
                 return ShardResult(index, True, storage_zip, cache_zip, "")
 
@@ -613,18 +615,23 @@ class RunPodBackend(IngestBackend):
         cmd = (f"python -m lexausearch.hf_cache push {index} "
                f"--db {work}/shard_cache.db --status {status} --live "
                f"--model {DENSE_MODEL}")
-        return cmd + (" --overwrite" if overwrite else "")
+        return cmd + (" --overwrite" if overwrite else "") + hf_repo_flag()
 
     def _safe_push_checkpoint(
-        self, index: int, work: str, overwrite: bool = False
+        self, index: int, work: str, overwrite: bool = False,
+        status: str = "partial",
     ) -> None:
+        """Best-effort HF push. Never raises: `check=False` suppresses the
+        RuntimeError on a non-zero remote exit but NOT an OSError or a
+        TimeoutExpired from the ssh subprocess itself, which would otherwise
+        propagate out of the poll loop and abort every remaining shard."""
         try:
-            r = self._ssh(self._push_cmd(index, work, "partial", overwrite), check=False)
+            r = self._ssh(self._push_cmd(index, work, status, overwrite), check=False)
             if getattr(r, "returncode", 0) != 0:
-                print(f"[runpod] shard {index} checkpoint push failed (non-fatal): "
+                print(f"[runpod] shard {index} {status} push failed (non-fatal): "
                       f"{getattr(r, 'stderr', '')}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
-            print(f"[runpod] shard {index} checkpoint push errored (non-fatal): {e}",
+            print(f"[runpod] shard {index} {status} push errored (non-fatal): {e}",
                   file=sys.stderr)
 
     def _handle_ssh_failure(self, index: int, work: str):

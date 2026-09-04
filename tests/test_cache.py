@@ -25,3 +25,33 @@ def test_merge_cache_files_closes_output_connection(tmp_path):
         conn.execute("COMMIT")
     finally:
         conn.close()
+
+
+def test_merge_cache_files_closes_every_connection_when_a_shard_raises(tmp_path, monkeypatch):
+    """A raise inside the per-shard loop must not leak the per-shard connection
+    (previously closed only on the happy path) or the output connection."""
+    import lexausearch.cache as cache_mod
+
+    good = tmp_path / "good.db"
+    EmbedCache(good)
+    bad = tmp_path / "bad.db"
+    bad.write_bytes(b"this is definitely not a sqlite database" * 32)
+    out = tmp_path / "out.db"
+
+    opened = []
+    real_connect = sqlite3.connect
+
+    def _tracking(*a, **k):
+        conn = real_connect(*a, **k)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(cache_mod.sqlite3, "connect", _tracking)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        merge_cache_files([good, bad], out)
+
+    assert opened, "expected merge_cache_files to open connections"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")  # ProgrammingError == already closed

@@ -173,3 +173,53 @@ def test_get_backend_runpod_gpu_type_ids_absent_is_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("RUNPOD_GPU_TYPE_IDS", raising=False)
     be = get_backend("runpod", _runpod_args(tmp_path))
     assert be.gpu_type_ids == ()
+
+
+# --------------------------- I4: a transient check_model error must not abort
+
+def test_check_model_error_fails_one_shard_without_aborting_run(tmp_path, monkeypatch, capsys):
+    def _flaky(i, *a, **k):
+        if i == 0:
+            raise RuntimeError("HF 503 Service Unavailable")
+        return rsi.hf_cache.Ok()
+
+    monkeypatch.setattr(rsi.hf_cache, "check_model", _flaky)
+    be = FakeBackend()
+    results = rsi.run_all(be, [0, 1], 300, tmp_path)
+    assert results == {0: False, 1: True}
+    assert [c[0] for c in be.run_shard_calls] == [1]  # shard 0 never launched
+    assert "shard 0" in capsys.readouterr().err
+
+
+# --------------------------- C1: --hf-cache-repo must reach the compute VM
+
+def _fake_backend_main(monkeypatch, tmp_path, extra):
+    be = FakeBackend()
+    monkeypatch.setattr(rsi, "get_backend", lambda name, args: be)
+    rsi.main(["--total-acts", "300", "--shard-size", "300",
+              "--shards-dir", str(tmp_path), *extra])
+    return be
+
+
+def test_hf_cache_repo_override_is_exported_to_the_environment(tmp_path, monkeypatch):
+    import os
+    monkeypatch.delenv("LEXAU_HF_CACHE_REPO", raising=False)
+    monkeypatch.setattr(rsi.hf_cache, "HF_CACHE_REPO", rsi.hf_cache._DEFAULT_HF_CACHE_REPO)
+    _fake_backend_main(monkeypatch, tmp_path, ["--hf-cache-repo", "cchew/throwaway"])
+    assert os.environ["LEXAU_HF_CACHE_REPO"] == "cchew/throwaway"
+    assert rsi.hf_cache.HF_CACHE_REPO == "cchew/throwaway"
+
+
+def test_default_hf_cache_repo_sets_no_env_override(tmp_path, monkeypatch):
+    import os
+    monkeypatch.delenv("LEXAU_HF_CACHE_REPO", raising=False)
+    _fake_backend_main(monkeypatch, tmp_path, [])
+    assert "LEXAU_HF_CACHE_REPO" not in os.environ
+
+
+def test_completion_hint_uses_the_from_hf_recipe(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("LEXAU_HF_CACHE_REPO", raising=False)
+    _fake_backend_main(monkeypatch, tmp_path, [])
+    err = capsys.readouterr().err
+    assert "--from-hf --push-hf" in err
+    assert "--shard-cache-paths" not in err

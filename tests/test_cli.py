@@ -484,3 +484,75 @@ def test_merge_shards_mixed_model_guard_refuses(tmp_path, monkeypatch):
         "--output-cache-path", str(tmp_path / "out.db")])
     assert r.exit_code != 0
     assert "refusing to merge" in r.output.lower()
+
+
+def test_merge_shards_from_hf_cleans_up_its_temp_dir(tmp_path, monkeypatch):
+    """--from-hf downloads every shard cache into a mkdtemp() dir; for the
+    11-shard production merge that is ~9GB that must not be abandoned in /tmp."""
+    import sqlite3
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    from click.testing import CliRunner
+    from lexausearch import cli as cli_mod, hf_cache
+    from lexausearch.cli import cli
+
+    monkeypatch.setattr(cli_mod, "QdrantClient", lambda path: object())
+    monkeypatch.setattr(cli_mod, "merge_shard_clients",
+                        lambda shards, out: {"sections": 0, "acts": 0})
+    monkeypatch.setattr(hf_cache, "read_catalogue",
+                        lambda token: hf_cache.Catalogue("m", 300, 300, {}))
+
+    made: list[_Path] = []
+    real_mkdtemp = _tempfile.mkdtemp
+
+    def _spy_mkdtemp(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        made.append(_Path(d))
+        return d
+
+    monkeypatch.setattr(_tempfile, "mkdtemp", _spy_mkdtemp)
+
+    def _fetch(i, dest, token=None, seed_as=None, expect_model=None):
+        db = _Path(dest) / seed_as
+        c = sqlite3.connect(str(db))
+        c.execute("CREATE TABLE embed_cache (id TEXT PRIMARY KEY, vector BLOB NOT NULL)")
+        c.commit()
+        c.close()
+        return hf_cache.ShardCacheMeta("m", 0, 1, "t", "x", "complete")
+
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", _fetch)
+
+    r = CliRunner().invoke(cli, [
+        "merge-shards", "--from-hf",
+        "--shard-storage-dirs", str(tmp_path / "s0"),
+        "--output-storage-dir", str(tmp_path / "out"),
+        "--output-cache-path", str(tmp_path / "out.db"),
+    ])
+    assert r.exit_code == 0, r.output
+    assert made, "expected --from-hf to allocate a temp dir"
+    assert not made[0].exists(), f"temp dir leaked: {made[0]}"
+
+
+def test_merge_shards_from_hf_cleans_up_temp_dir_on_failure(tmp_path, monkeypatch):
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    from click.testing import CliRunner
+    from lexausearch import cli as cli_mod, hf_cache
+    from lexausearch.cli import cli
+
+    monkeypatch.setattr(hf_cache, "read_catalogue",
+                        lambda token: hf_cache.Catalogue("m", 300, 300, {}))
+    made: list[_Path] = []
+    real_mkdtemp = _tempfile.mkdtemp
+    monkeypatch.setattr(_tempfile, "mkdtemp",
+                        lambda *a, **k: made.append(_Path(real_mkdtemp(*a, **k))) or str(made[-1]))
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", lambda *a, **k: None)  # shard absent
+
+    r = CliRunner().invoke(cli, [
+        "merge-shards", "--from-hf",
+        "--shard-storage-dirs", str(tmp_path / "s0"),
+        "--output-storage-dir", str(tmp_path / "out"),
+        "--output-cache-path", str(tmp_path / "out.db"),
+    ])
+    assert r.exit_code != 0
+    assert made and not made[0].exists(), "temp dir leaked on the error path"

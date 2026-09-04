@@ -392,3 +392,63 @@ def test_cli_push_exit_4_on_head_mismatch(tmp_path, monkeypatch):
     rc = hf_cache.main(["push", "0", "--db", str(tmp_path / "c.db"),
                         "--status", "partial", "--model", "new", "--token", "t"])
     assert rc == 4
+
+
+# ------------------------------------------- C1: repo override plumbing
+
+def test_repo_default_constant_is_the_production_repo():
+    assert hf_cache._DEFAULT_HF_CACHE_REPO == "cchew/lex-au-search-embed-cache"
+
+
+def test_cli_fetch_repo_arg_rebinds_module_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "HF_CACHE_REPO", hf_cache._DEFAULT_HF_CACHE_REPO)
+    seen = {}
+
+    def _fetch(*a, **k):
+        seen["repo"] = hf_cache.HF_CACHE_REPO
+        return None
+
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache", _fetch)
+    rc = hf_cache.main(["fetch", "0", "--dest", str(tmp_path), "--repo", "x/y"])
+    assert rc == 0
+    assert seen["repo"] == "x/y"
+
+
+def test_cli_push_repo_arg_rebinds_module_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "HF_CACHE_REPO", hf_cache._DEFAULT_HF_CACHE_REPO)
+    (tmp_path / "c.db").write_bytes(b"x")
+    seen = {}
+
+    def _push(*a, **k):
+        seen["repo"] = hf_cache.HF_CACHE_REPO
+        return hf_cache.ShardCacheMeta("m", 1, 2, "t", "x", "partial")
+
+    monkeypatch.setattr(hf_cache, "push_shard_cache", _push)
+    rc = hf_cache.main(["push", "0", "--db", str(tmp_path / "c.db"), "--status",
+                        "partial", "--model", "m", "--token", "t", "--repo", "x/y"])
+    assert rc == 0
+    assert seen["repo"] == "x/y"
+
+
+def test_cli_without_repo_arg_leaves_module_repo_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "HF_CACHE_REPO", "env/set")
+    seen = {}
+    monkeypatch.setattr(hf_cache, "fetch_shard_cache",
+                        lambda *a, **k: seen.setdefault("repo", hf_cache.HF_CACHE_REPO))
+    hf_cache.main(["fetch", "0", "--dest", str(tmp_path)])
+    assert seen["repo"] == "env/set"
+
+
+# ------------------------------------------------- I6: chunked sha256
+
+def test_sha256_file_is_chunked_not_slurped(tmp_path, monkeypatch):
+    import hashlib as _hashlib
+    p = tmp_path / "big.bin"
+    data = (b"lex-au" * 200_000)[: 3 * (1 << 20) + 17]
+    p.write_bytes(data)
+
+    def _boom(self):
+        raise AssertionError("_sha256_file must not read the whole file into memory")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    assert hf_cache._sha256_file(p) == _hashlib.sha256(data).hexdigest()

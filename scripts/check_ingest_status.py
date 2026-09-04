@@ -60,6 +60,34 @@ def shard_status(index: int, shards_dir: Path) -> dict:
     return {"index": index, "state": "NOT STARTED", "detail": ""}
 
 
+def print_hf_section(shards_dir: Path) -> None:
+    """Spec §6.2 columns: shard | generation | row_count | model | status |
+    updated_at | local_stale?. `local_stale?` is yes when this laptop's mirror
+    marker generation is behind HF's - i.e. `shards/` no longer reflects the
+    home of record. Degrades to one line when HF is unreachable/offline."""
+    print("\nHF cache:")
+    try:
+        from lexausearch import hf_cache
+        cat = hf_cache.read_catalogue(token=None)
+        if cat is None:
+            print("  (no catalogue.json in the HF repo yet)")
+            return
+        n = -(-cat.total_acts // cat.shard_size)
+        print(f"  {'shard':>5} {'gen':>4} {'rows':>8} {'status':>9} "
+              f"{'updated_at':>21} {'local_stale?':>13}  model")
+        for i in range(n):
+            m = hf_cache._read_sidecar(i, None)
+            if m is None:
+                print(f"  {i:>5} {'-':>4} {'-':>8} {'absent':>9} "
+                      f"{'-':>21} {'-':>13}")
+                continue
+            stale = hf_cache._local_marker_generation(Path(shards_dir), i) < m.generation
+            print(f"  {i:>5} {m.generation:>4} {m.row_count:>8} {m.status:>9} "
+                  f"{m.updated_at:>21} {('yes' if stale else 'no'):>13}  {m.model_name}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  unreachable ({type(e).__name__}: {e})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--total-acts", type=int, default=None,
@@ -119,23 +147,7 @@ def main() -> None:
         print(f"\nAll {total_shards} shards complete - ready for merge-shards.", file=sys.stderr)
 
     if not args.no_hf:
-        print("\nHF cache:")
-        try:
-            from lexausearch import hf_cache
-            cat = hf_cache.read_catalogue(token=None)
-            if cat is None:
-                print("  (no catalogue.json in the HF repo yet)")
-            else:
-                n = -(-cat.total_acts // cat.shard_size)
-                print(f"  {'shard':>5} {'gen':>4} {'rows':>8} {'status':>9}  model")
-                for i in range(n):
-                    m = hf_cache._read_sidecar(i, None)
-                    if m is None:
-                        print(f"  {i:>5} {'-':>4} {'-':>8} {'absent':>9}")
-                    else:
-                        print(f"  {i:>5} {m.generation:>4} {m.row_count:>8} {m.status:>9}  {m.model_name}")
-        except Exception as e:  # noqa: BLE001
-            print(f"  unreachable ({type(e).__name__}: {e})")
+        print_hf_section(args.shards_dir)
 
 
 if __name__ == "__main__":

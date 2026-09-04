@@ -24,7 +24,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import colab_driver as cd
 
-from backends.base import IngestBackend, SeedMode, ShardResult, shard_paths
+from backends.base import (
+    IngestBackend,
+    SeedMode,
+    ShardResult,
+    hf_repo_flag,
+    shard_paths,
+)
 from lexausearch.models import DENSE_MODEL
 
 POLL_INTERVAL_S = 30
@@ -62,6 +68,7 @@ class ColabBackend(IngestBackend):
             f"--db {self._remote_cache_db_path} --status {status} --live "
             f"--model {DENSE_MODEL} --token-file /content/.hf_token"
             + (" --overwrite" if overwrite else "")
+            + hf_repo_flag()
         )
         try:
             rc, _out, err = cd.exec_sync(name, cmd, timeout=180)
@@ -127,7 +134,7 @@ class ColabBackend(IngestBackend):
                     f" && python -m lexausearch.hf_cache fetch {index} "
                     f"--dest /content --seed-as /content/shard_cache_seed.db "
                     f"--token-file /content/.hf_token "
-                    f"--expect-model {DENSE_MODEL}"
+                    f"--expect-model {DENSE_MODEL}" + hf_repo_flag()
                 )
             remote_cmd = (
                 f"rm -rf repo && git clone --depth 1 {REPO_URL} repo && cd repo "

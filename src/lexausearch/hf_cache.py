@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -22,7 +23,12 @@ from pathlib import Path
 from huggingface_hub import HfApi, hf_hub_download, CommitOperationAdd
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, HfHubHTTPError
 
-HF_CACHE_REPO = "cchew/lex-au-search-embed-cache"
+_DEFAULT_HF_CACHE_REPO = "cchew/lex-au-search-embed-cache"
+# Resolution order: `--repo` on the CLI > LEXAU_HF_CACHE_REPO in the env >
+# the default. The env var is what carries a smoke run's throwaway repo to a
+# compute VM, where `python -m lexausearch.hf_cache` runs as a fresh process
+# and cannot see the laptop's in-process rebind of this name.
+HF_CACHE_REPO = os.environ.get("LEXAU_HF_CACHE_REPO") or _DEFAULT_HF_CACHE_REPO
 _HUB_TOKEN_PATH = Path.home() / ".cache" / "huggingface" / "token"
 
 
@@ -137,8 +143,12 @@ def check_model(shard_index: int, current_model: str, *, token: str | None) -> M
 
 
 def _sha256_file(path: Path) -> str:
+    # Chunked: this runs on the push path against a 700MiB+ DB, on a ~12GB
+    # compute VM alongside a live embed job. Never slurp the file.
     h = hashlib.sha256()
-    h.update(path.read_bytes())
+    with path.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
     return h.hexdigest()
 
 
@@ -250,6 +260,13 @@ def push_shard_cache(shard_index: int, local_db: Path, *, model_name: str,
             CommitOperationAdd(path_in_repo=_shard_db_name(shard_index), path_or_fileobj=str(upload_db)),
             CommitOperationAdd(path_in_repo=_shard_json_name(shard_index), path_or_fileobj=str(sidecar_path)),
         ]
+        # NOTE: this retry branch is currently UNREACHABLE. `create_commit` is
+        # called without `parent_commit`, so no optimistic-concurrency
+        # precondition is sent and the Hub never answers 412. It is kept as the
+        # placeholder for the FUTURE parallel-execution work (FUTURE items 5-6),
+        # which is what would send a parent_commit. Under the present sequential
+        # model, safety comes from pull-merge-push being commutative and
+        # idempotent, not from this branch. See spec 3.2.1.
         for attempt in (1, 2):
             try:
                 _api().create_commit(
@@ -329,6 +346,8 @@ def _build_parser() -> argparse.ArgumentParser:
     f.add_argument("--expect-model", default=None)
     f.add_argument("--token", default=None)
     f.add_argument("--token-file", default=None)
+    f.add_argument("--repo", default=None,
+                   help="HF dataset repo to read (overrides LEXAU_HF_CACHE_REPO)")
 
     p = sub.add_parser("push")
     p.add_argument("index", type=int)
@@ -339,11 +358,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true")
     p.add_argument("--token", default=None)
     p.add_argument("--token-file", default=None)
+    p.add_argument("--repo", default=None,
+                   help="HF dataset repo to write (overrides LEXAU_HF_CACHE_REPO)")
     return ap
 
 
 def main(argv=None) -> int:
+    global HF_CACHE_REPO
     args = _build_parser().parse_args(argv)
+    # `--repo` wins over the env-resolved module default. Set before any HF call
+    # so every read/write in this process targets the overridden repo.
+    if args.repo:
+        HF_CACHE_REPO = args.repo
     token = _resolve_token(args.token, args.token_file)
     if args.verb == "fetch":
         try:

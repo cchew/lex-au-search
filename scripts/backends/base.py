@@ -9,9 +9,25 @@ backend-agnostic orchestrator on top.
 from __future__ import annotations
 
 import enum
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def hf_repo_flag() -> str:
+    """` --repo <repo>` to append to a remote `python -m lexausearch.hf_cache`
+    invocation, or "" when no override is active.
+
+    The compute VM runs the module as a FRESH process: the orchestrator's
+    in-process rebind of `hf_cache.HF_CACHE_REPO` is invisible there, and the
+    VM does not inherit the laptop's environment either. So a smoke run's
+    throwaway repo has to travel as an explicit argv flag or the VM silently
+    reads and overwrites production. `run_sharded_ingest` exports
+    LEXAU_HF_CACHE_REPO when `--hf-cache-repo` is not the default.
+    """
+    repo = (os.environ.get("LEXAU_HF_CACHE_REPO") or "").strip()
+    return f" --repo {repo}" if repo else ""
 
 
 class SeedMode(enum.Enum):

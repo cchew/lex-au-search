@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from math import ceil
 from pathlib import Path
@@ -52,7 +53,16 @@ def run_all(
                 print(f"[shard {i}] already downloaded, skipping", file=sys.stderr)
                 results[i] = True
                 continue
-            verdict = hf_cache.check_model(i, DENSE_MODEL, token=None)
+            try:
+                verdict = hf_cache.check_model(i, DENSE_MODEL, token=None)
+            except Exception as e:  # noqa: BLE001
+                # A transient HF outage/5xx/rate-limit must fail this shard, not
+                # abort a multi-hour multi-shard run. Nothing is lost: the
+                # pre-flight runs before any compute is provisioned.
+                print(f"[shard {i}] HF model pre-flight failed ({e}); "
+                      f"skipping this shard - re-run to retry", file=sys.stderr)
+                results[i] = False
+                continue
             if isinstance(verdict, hf_cache.Mismatch):
                 if reseed_on_model_mismatch:
                     print(f"[shard {i}] model {verdict.old} -> {verdict.new}: "
@@ -119,8 +129,15 @@ def main(argv=None) -> None:
     if not args.reap and args.total_acts is None:
         parser.error("--total-acts is required unless --reap is given")
     load_env(__file__)
-    if args.hf_cache_repo != "cchew/lex-au-search-embed-cache":
+    if args.hf_cache_repo != hf_cache._DEFAULT_HF_CACHE_REPO:
+        # Two hops, both required. The rebind covers this process (pre-flight,
+        # mirror). The env export is what the backends read to append an
+        # explicit `--repo` to every remote `python -m lexausearch.hf_cache`
+        # call: the compute VM runs a fresh process with neither this rebind
+        # nor this environment, so without it a throwaway-repo smoke run would
+        # fetch from - and overwrite - production.
         hf_cache.HF_CACHE_REPO = args.hf_cache_repo
+        os.environ["LEXAU_HF_CACHE_REPO"] = args.hf_cache_repo
 
     if args.reap:
         # NOTE: --reap does not take the run lock - it will also terminate a
@@ -159,11 +176,10 @@ def main(argv=None) -> None:
     print(
         f"\n{scope} downloaded to {args.shards_dir}/"
         + (f" (skipped {sorted(skip)} - merge those in manually)." if skip else ".")
-        + " Unzip each shard_NNN.zip "
-        f"and shard_NNN_cache.zip, then run:\n"
+        + " Unzip each shard_NNN.zip, then run:\n"
         f"  lex-au-search merge-shards "
         f"--shard-storage-dirs <unzipped storage dirs, comma-separated> "
-        f"--shard-cache-paths <unzipped .db files, comma-separated> "
+        f"--from-hf --push-hf "
         f"--output-storage-dir ./qdrant_storage --output-cache-path ./embed_cache.db",
         file=sys.stderr,
     )

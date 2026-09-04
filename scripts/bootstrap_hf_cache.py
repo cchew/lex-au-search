@@ -24,19 +24,28 @@ from lexausearch.models import DENSE_MODEL
 from huggingface_hub import CommitOperationAdd
 
 
-def _build_entries(shards_dir: Path, indices: list[int], model: str) -> list[dict]:
+def _build_entries(shards_dir: Path, indices: list[int], model: str,
+                   workdir: Path) -> list[dict]:
+    """Flatten each shard DB into `workdir` EXACTLY ONCE, and hash that file.
+
+    The flat copy must persist for `_plan` to upload: hashing one `.backup` and
+    uploading a second, independently produced one means any byte of drift
+    between them (a write to the source DB in between) lands a DB on HF whose
+    sha256 never matches its sidecar - a permanent HfCacheCorrupt on fetch that
+    makes the shard unrunnable. One backup, one hash, one upload.
+    """
+    workdir = Path(workdir)
     out = []
     for i in indices:
         db = shards_dir / hf_cache._shard_db_name(i)
         if not db.is_file():
             continue
-        with tempfile.TemporaryDirectory() as td:
-            flat = Path(td) / "flat.db"
-            hf_cache._sqlite_backup(db, flat)
-            rows = hf_cache._row_count(flat)
-            sha = hf_cache._sha256_file(flat)
+        flat = workdir / f"flat_{i:03d}.db"
+        hf_cache._sqlite_backup(db, flat)
+        rows = hf_cache._row_count(flat)
+        sha = hf_cache._sha256_file(flat)
         status = "complete" if (shards_dir / f"shard_{i:03d}.zip").is_file() else "partial"
-        out.append({"index": i, "db": db, "sidecar": {
+        out.append({"index": i, "db": db, "upload_db": flat, "sidecar": {
             "model_name": model, "row_count": rows, "generation": 1,
             "updated_at": hf_cache._now(), "sha256": sha, "status": status,
         }})
@@ -55,14 +64,15 @@ def _plan(entries, catalogue, dry_run, token):
     api = hf_cache._api()
     for e in entries:
         with tempfile.TemporaryDirectory() as td:
-            flat = Path(td) / "flat.db"
-            hf_cache._sqlite_backup(e["db"], flat)
+            # e["upload_db"] is the SAME file _build_entries hashed - never a
+            # fresh backup.
             sc = Path(td) / hf_cache._shard_json_name(e["index"])
             sc.write_text(json.dumps(e["sidecar"], indent=2))
             api.create_commit(
                 repo_id=hf_cache.HF_CACHE_REPO, repo_type="dataset",
                 operations=[
-                    CommitOperationAdd(hf_cache._shard_db_name(e["index"]), str(flat)),
+                    CommitOperationAdd(hf_cache._shard_db_name(e["index"]),
+                                       str(e["upload_db"])),
                     CommitOperationAdd(hf_cache._shard_json_name(e["index"]), str(sc)),
                 ],
                 commit_message=f"bootstrap shard {e['index']}", token=token,
@@ -84,7 +94,15 @@ def main(argv=None) -> int:
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--allow-partial", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--repo", default=None,
+                    help=f"HF dataset repo to seed (default: {hf_cache.HF_CACHE_REPO}). "
+                         f"Point a smoke run at a throwaway.")
     args = ap.parse_args(argv)
+
+    # Every HF call in this script goes through hf_cache.HF_CACHE_REPO, so one
+    # rebind covers create_cache_repo, the shard commits, and the catalogue.
+    if args.repo:
+        hf_cache.HF_CACHE_REPO = args.repo
 
     load_env(__file__)
     token = os.environ.get("HF_CACHE_WRITE_TOKEN")
@@ -107,12 +125,18 @@ def main(argv=None) -> int:
         if input("Proceed? type 'yes': ").strip() != "yes":
             return 1
 
-    hf_cache.create_cache_repo(token=token)
-    entries = _build_entries(args.shards_dir, present, DENSE_MODEL)
+    # Spec 8.8: a dry run performs NO API writes. create_repo + the
+    # .gitattributes commit are real writes, so they sit behind this guard.
+    if not args.dry_run:
+        hf_cache.create_cache_repo(token=token)
     catalogue = {"dense_model": DENSE_MODEL, "shard_size": args.shard_size,
                  "total_acts": args.total_acts,
                  "master": {"row_count": 0, "generation": 0, "updated_at": None}}
-    _plan(entries, catalogue, args.dry_run, token)
+    # One temp dir for the whole run: the flat backups _build_entries hashes are
+    # the files _plan uploads, so they have to outlive _build_entries.
+    with tempfile.TemporaryDirectory(prefix="bootstrap-hf-cache-") as td:
+        entries = _build_entries(args.shards_dir, present, DENSE_MODEL, Path(td))
+        _plan(entries, catalogue, args.dry_run, token)
     print(f"done: {len(entries)} shard cache(s)")
     return 0
 
