@@ -127,6 +127,24 @@ def test_remote_cmd_contains_hf_fetch(monkeypatch, tmp_path):
     assert cmd.index("setup_gpu_env.sh") < cmd.index("hf_cache fetch") < cmd.index("ingest_shard.sh")
 
 
+def test_remote_cmd_installs_hf_token_at_default_path(monkeypatch, tmp_path):
+    rec = _Recorder(poll_sequence=["done"])
+    _install_recorder(monkeypatch, rec)
+    monkeypatch.setattr(colab_mod.time, "sleep", lambda *_: None)
+    monkeypatch.delenv("HF_CACHE_WRITE_TOKEN", raising=False)
+
+    ColabBackend(shards_dir=tmp_path, gpu="T4").run_shard(0, 300, SeedMode.HF)
+
+    cmd = rec.last_remote_cmd
+    # Token copied to huggingface_hub's default location so ingest_shard.sh's
+    # corpus/model snapshot_download calls authenticate too.
+    assert "cp /content/.hf_token $HOME/.cache/huggingface/token" in cmd
+    assert "|| true" in cmd.split("cp /content/.hf_token")[1].split("&&")[0]
+    # Runs before the clone (which would need auth) and before setup/fetch.
+    assert cmd.index("huggingface/token") < cmd.index("git clone")
+    assert cmd.index("huggingface/token") < cmd.index("hf_cache fetch")
+
+
 def test_seedless_overwrite_omits_fetch(monkeypatch, tmp_path):
     rec = _Recorder(poll_sequence=["done"])
     _install_recorder(monkeypatch, rec)

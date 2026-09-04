@@ -136,7 +136,16 @@ class ColabBackend(IngestBackend):
                     f"--token-file /content/.hf_token "
                     f"--expect-model {DENSE_MODEL}" + hf_repo_flag()
                 )
+            # Put the HF token where huggingface_hub looks for it by default, so
+            # the corpus-XML and model snapshot_download calls in
+            # ingest_shard.sh authenticate too (higher read rate limits, faster
+            # downloads) - not just hf_cache's own --token-file reads. RunPod
+            # already does this via _write_hf_token; Colab keeps the token at
+            # /content/.hf_token so `rm -rf repo` can't wipe it. Absent token ->
+            # cp fails -> `|| true` -> unauthenticated run, exactly as before.
             remote_cmd = (
+                f"mkdir -p $HOME/.cache/huggingface && "
+                f"{{ cp /content/.hf_token $HOME/.cache/huggingface/token 2>/dev/null || true; }} && "
                 f"rm -rf repo && git clone --depth 1 {REPO_URL} repo && cd repo "
                 f"&& bash scripts/setup_gpu_env.sh"
                 f"{fetch_line}"
