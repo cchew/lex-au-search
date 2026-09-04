@@ -265,12 +265,38 @@ def tail_log(name: str, log_path: str = "job.log", n: int = 50) -> str:
     return result.stdout
 
 
+_EXEC_SYNC_RC_MARKER = "__EXEC_SYNC_RC__"
+
+
 def exec_sync(name: str, command: str, timeout: int = 180) -> tuple[int, str, str]:
-    """Run `command` on the session's VM synchronously; return
-    (returncode, stdout, stderr). For short remote calls (an HF push trigger),
-    not for the long-running ingest job (use run_background for that)."""
-    r = _colab("exec", "-s", name, timeout=timeout, input_str=command)
-    return (r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip())
+    """Run shell `command` on the session's VM synchronously; return
+    (returncode, output, ""). For short remote calls (an HF push trigger), not
+    the long-running ingest job (use run_background for that).
+
+    `colab exec` executes its stdin as Python in the kernel, not shell, and
+    exits 0 even when that Python raises - so a bare shell string handed to it
+    silently no-ops (found in the 2026-09-04 Gate 2 smoke: every Colab-side
+    checkpoint/terminal push was a dead letter). The command is therefore
+    wrapped in a `subprocess.run(['bash','-lc', ...])` shim and the child's real
+    exit code recovered from a stdout marker rather than the unreliable
+    `colab exec` return code (same reason verify_session keys on a stdout
+    marker)."""
+    code = (
+        "import subprocess\n"
+        f"_r = subprocess.run(['bash', '-lc', {command!r}], "
+        "capture_output=True, text=True)\n"
+        "print(_r.stdout)\n"
+        "print(_r.stderr)\n"
+        f"print({_EXEC_SYNC_RC_MARKER!r} + str(_r.returncode))\n"
+    )
+    r = _colab("exec", "-s", name, timeout=timeout, input_str=code)
+    combined = (r.stdout or "") + (r.stderr or "")
+    m = re.search(re.escape(_EXEC_SYNC_RC_MARKER) + r"(-?\d+)", combined)
+    if m:
+        return (int(m.group(1)), combined.replace(m.group(0), "").strip(), "")
+    # Marker absent => the kernel exec itself failed (session lost, timeout, a
+    # syntax error in this shim). Surface it as a non-zero result.
+    return (r.returncode or 1, combined.strip(), "")
 
 
 def download(name: str, remote_path: str, local_path: str) -> bool:

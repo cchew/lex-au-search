@@ -394,12 +394,16 @@ def test_build_run_wrapper_settles_exitcode_atomically(tmp_path):
     assert ec.read_text() == "7"
 
 
-def test_exec_sync_forwards_command_and_returns_tuple(monkeypatch):
+def test_exec_sync_wraps_command_in_bash_shim_and_recovers_child_rc(monkeypatch):
+    # colab exec runs stdin as Python, not shell, and exits 0 even when the
+    # kernel code raises. exec_sync must wrap the shell command in a
+    # subprocess.run(['bash','-lc', ...]) shim and read the child's real exit
+    # code from the stdout marker, not colab exec's own returncode.
     import colab_driver as cd
     seen = {}
     class _R:
         returncode = 0
-        stdout = "ok"
+        stdout = f"child stdout line\n\n{cd._EXEC_SYNC_RC_MARKER}7\n"
         stderr = ""
     def _fake_colab(*args, timeout, input_str=None):
         seen["args"] = args
@@ -407,8 +411,31 @@ def test_exec_sync_forwards_command_and_returns_tuple(monkeypatch):
         seen["timeout"] = timeout
         return _R()
     monkeypatch.setattr(cd, "_colab", _fake_colab)
-    rc, out, err = cd.exec_sync("sess-1", "echo hi", timeout=42)
-    assert (rc, out, err) == (0, "ok", "")
+    rc, out, err = cd.exec_sync("sess-1", "python -m x.y push 0 --repo a/b", timeout=42)
+
     assert seen["args"] == ("exec", "-s", "sess-1")
-    assert seen["input"] == "echo hi"
     assert seen["timeout"] == 42
+    # the shell command is NOT sent raw - it is embedded in a bash -lc shim
+    assert seen["input"] != "python -m x.y push 0 --repo a/b"
+    assert "subprocess.run(['bash', '-lc'," in seen["input"]
+    assert "'python -m x.y push 0 --repo a/b'" in seen["input"]
+    assert cd._EXEC_SYNC_RC_MARKER in seen["input"]
+    # child rc recovered from the marker (7), marker stripped from the output
+    assert rc == 7
+    assert "child stdout line" in out
+    assert cd._EXEC_SYNC_RC_MARKER not in out
+    assert err == ""
+
+
+def test_exec_sync_treats_missing_marker_as_failure(monkeypatch):
+    # No marker => the kernel exec itself failed (session lost / timeout / a
+    # syntax error in the shim). Must surface non-zero, never a false 0.
+    import colab_driver as cd
+    class _R:
+        returncode = 0        # colab exec's own rc is unreliable - ignore it
+        stdout = "Traceback (most recent call last): ...\n"
+        stderr = ""
+    monkeypatch.setattr(cd, "_colab", lambda *a, timeout, input_str=None: _R())
+    rc, out, err = cd.exec_sync("sess-1", "true")
+    assert rc != 0
+    assert "Traceback" in out
