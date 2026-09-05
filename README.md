@@ -37,6 +37,17 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+## Getting a pre-built index
+
+Skip ingest entirely: [`cchew/lex-au-search-index`](https://huggingface.co/datasets/cchew/lex-au-search-index) on HF is the finished, ready-to-query Qdrant store (534,335 chunks, 3,073 Acts as of v0.5.0).
+
+```bash
+python -c "from huggingface_hub import snapshot_download; print(snapshot_download(repo_id='cchew/lex-au-search-index', repo_type='dataset'))"
+lex-au-search serve --storage-dir <downloaded path>/qdrant_storage
+```
+
+This is a different artifact from `cchew/lex-au-search-embed-cache` below, which is the ingest pipeline's own resumable embedding cache, not something meant for direct search.
+
 ## Before full ingest
 
 The ingest command embeds sections using a local ONNX model (~1.1 GB, downloaded once to `~/.cache/fastembed/`). CPU-only ingest does not scale well past a few hundred Acts - budget on the order of a day or more for the full corpus (2,900+ Acts, 500,000+ chunks) on a laptop CPU, and significant RAM while running.
