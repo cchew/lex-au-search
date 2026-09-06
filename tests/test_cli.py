@@ -307,6 +307,79 @@ def test_ingest_delta_isolates_per_act_failure(tmp_path):
     assert act_hashes["Privacy Act 1988"] == expected_privacy_hash
 
 
+def test_ingest_delta_prunes_acts_removed_from_corpus(tmp_path):
+    """An Act dropped from the corpus index must be deleted from the index,
+    not left behind as a searchable orphan."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_n_act_corpus(corpus_dir, 12)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from lexausearch.indexer import COLLECTION_SECTIONS, COLLECTION_ACTS
+    assert _ids_for_act(storage_dir, COLLECTION_SECTIONS, "Test Act 011")
+
+    # Drop one Act from the corpus (11/12 remain -> under the 10% prune ceiling).
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    del index["acts"]["test-act-011"]
+    index_path.write_text(json.dumps(index))
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 removed from corpus" in result.output
+
+    assert _ids_for_act(storage_dir, COLLECTION_SECTIONS, "Test Act 011") == set()
+    assert _ids_for_act(storage_dir, COLLECTION_ACTS, "Test Act 011") == set()
+    # A retained Act is untouched.
+    assert _ids_for_act(storage_dir, COLLECTION_ACTS, "Test Act 000")
+
+
+def test_ingest_delta_refuses_mass_orphan_prune(tmp_path):
+    """A corpus missing a large fraction of the indexed Acts is more likely a
+    wrong/partial --corpus-dir than a real mass repeal -- do not prune."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_n_act_corpus(corpus_dir, 12)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    # Drop 3 of 12 (25% > 10% ceiling).
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    for slug in ("test-act-009", "test-act-010", "test-act-011"):
+        del index["acts"][slug]
+    index_path.write_text(json.dumps(index))
+
+    result = runner.invoke(cli, [
+        "ingest-delta", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code != 0
+    assert "refusing to prune" in result.output.lower()
+
+    from lexausearch.indexer import COLLECTION_ACTS
+    # Orphans left intact rather than risk deleting real data.
+    assert _ids_for_act(storage_dir, COLLECTION_ACTS, "Test Act 011")
+
+
 def _write_two_act_corpus(corpus_dir):
     xml_dir = corpus_dir / "xml"
     xml_dir.mkdir()
@@ -319,6 +392,20 @@ def _write_two_act_corpus(corpus_dir):
         }
     }
     (corpus_dir / "index.json").write_text(json.dumps(index))
+
+
+def _write_n_act_corpus(corpus_dir, n):
+    """n Acts sharing the Privacy Act body under distinct names/paths, so
+    orphan-prune ratio maths has room to move in a test."""
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir()
+    acts = {}
+    for i in range(n):
+        slug = f"test-act-{i:03d}"
+        (xml_dir / f"{slug}.xml").write_text(PRIVACY_ACT_XML)
+        acts[slug] = {"name": f"Test Act {i:03d}", "xml_path": f"xml/{slug}.xml"}
+    (corpus_dir / "index.json").write_text(json.dumps({"acts": acts}))
+    return acts
 
 
 def test_ingest_shard_only_indexes_its_own_slice(tmp_path):

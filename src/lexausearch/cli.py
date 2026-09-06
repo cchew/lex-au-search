@@ -19,6 +19,12 @@ from lexausearch.api import create_app
 from lexausearch.mcp import run_mcp_server
 
 
+# ingest-delta will prune Acts that vanished from the corpus, but only up to
+# this fraction of the indexed set in one run. A larger gap is almost always a
+# wrong/partial --corpus-dir, not a real mass repeal, so it aborts instead.
+_MAX_ORPHAN_PRUNE_FRACTION = 0.10
+
+
 def _year_from_frbr_uri(frbr_uri: str) -> int:
     # /akn/au/act/1988/119/eng@...  →  1988
     parts = frbr_uri.split("/")
@@ -333,7 +339,8 @@ def merge_shards_cmd(
     help="Path to a persistent SQLite embedding cache file (same semantics as `ingest`).",
 )
 def ingest_delta(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
-    """Re-index only Acts whose content hash changed since the last ingest."""
+    """Re-index only Acts whose content hash changed since the last ingest,
+    and prune Acts that have since been removed from the corpus."""
     try:
         client = QdrantClient(path=str(storage_dir))
     except RuntimeError as e:
@@ -357,60 +364,87 @@ def ingest_delta(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
         indexed = fetch_all_act_hashes(client)
 
         changed_or_new = sorted(name for name, h in current.items() if indexed.get(name) != h)
+        orphans = sorted(set(indexed) - set(current))
         unchanged_count = len(current) - len(changed_or_new)
         click.echo(
-            f"{len(changed_or_new)} Act(s) changed or new, {unchanged_count} unchanged (skipped)."
+            f"{len(changed_or_new)} Act(s) changed or new, {unchanged_count} unchanged "
+            f"(skipped), {len(orphans)} removed from corpus."
         )
-        if not changed_or_new:
+        if not changed_or_new and not orphans:
             click.echo("Nothing to do.")
             return
 
-        click.echo(f"Embedding cache: {cache_path} (persists across runs)")
-        indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
+        pruned_count = 0
+        prune_refused = False
+        if orphans:
+            frac = len(orphans) / len(indexed) if indexed else 0.0
+            if frac > _MAX_ORPHAN_PRUNE_FRACTION:
+                prune_refused = True
+                click.echo(
+                    f"  REFUSING TO PRUNE: {len(orphans)} of {len(indexed)} indexed "
+                    f"Act(s) ({frac:.0%}) are absent from the corpus -- more likely a "
+                    f"wrong or partial --corpus-dir than a real mass repeal. Orphans "
+                    f"left in place; re-run against the full corpus."
+                )
+            else:
+                for act_name in orphans:
+                    click.echo(f"  pruning removed Act: {act_name}")
+                    delete_act(client, act_name)
+                    pruned_count += 1
 
         reindexed_count = 0
         skipped: list[str] = []
         failed: list[str] = []
+        cache_hits = cache_misses = 0
 
-        for i, act_name in enumerate(changed_or_new, 1):
-            click.echo(f"  [{i}/{len(changed_or_new)}] {act_name}")
-            try:
-                # Chunk BEFORE deleting: a corpus regression that makes an Act
-                # produce zero chunks must not delete that Act's existing index
-                # entry with nothing to replace it -- stale-but-present beats
-                # missing. Only delete once we know we have chunks in hand.
-                act_chunk_list = chunk_corpus_for_acts(corpus_dir, {act_name})
-                if not act_chunk_list:
-                    click.echo(
-                        f"    WARNING: {act_name} produced zero chunks, not "
-                        f"re-indexed (existing index entry left in place)."
-                    )
-                    skipped.append(act_name)
+        if changed_or_new:
+            click.echo(f"Embedding cache: {cache_path} (persists across runs)")
+            indexer = Indexer(client, cache=EmbedCache(cache_path, model_name=DENSE_MODEL))
+
+            for i, act_name in enumerate(changed_or_new, 1):
+                click.echo(f"  [{i}/{len(changed_or_new)}] {act_name}")
+                try:
+                    # Chunk BEFORE deleting: a corpus regression that makes an Act
+                    # produce zero chunks must not delete that Act's existing index
+                    # entry with nothing to replace it -- stale-but-present beats
+                    # missing. Only delete once we know we have chunks in hand.
+                    act_chunk_list = chunk_corpus_for_acts(corpus_dir, {act_name})
+                    if not act_chunk_list:
+                        click.echo(
+                            f"    WARNING: {act_name} produced zero chunks, not "
+                            f"re-indexed (existing index entry left in place)."
+                        )
+                        skipped.append(act_name)
+                        continue
+                    delete_act(client, act_name)
+                    indexer.upsert_chunks(act_chunk_list)
+                    indexer.upsert_acts([_act_record_from_chunks(act_name, act_chunk_list, current[act_name])])
+                    reindexed_count += 1
+                except Exception as e:
+                    click.echo(f"    ERROR: {act_name} failed, leaving prior index entry in place: {e}")
+                    failed.append(act_name)
                     continue
-                delete_act(client, act_name)
-                indexer.upsert_chunks(act_chunk_list)
-                indexer.upsert_acts([_act_record_from_chunks(act_name, act_chunk_list, current[act_name])])
-                reindexed_count += 1
-            except Exception as e:
-                click.echo(f"    ERROR: {act_name} failed, leaving prior index entry in place: {e}")
-                failed.append(act_name)
-                continue
+
+            cache_hits, cache_misses = indexer.cache_hits, indexer.cache_misses
 
         click.echo(
-            f"Done. {reindexed_count} Act(s) re-indexed, {unchanged_count} unchanged (skipped)."
+            f"Done. {reindexed_count} Act(s) re-indexed, {pruned_count} pruned, "
+            f"{unchanged_count} unchanged (skipped)."
         )
-        click.echo(
-            f"Embedding cache: {indexer.cache_hits} hits, {indexer.cache_misses} misses "
-            f"({indexer.cache_hits} chunks skipped re-embedding)."
-        )
+        if changed_or_new:
+            click.echo(
+                f"Embedding cache: {cache_hits} hits, {cache_misses} misses "
+                f"({cache_hits} chunks skipped re-embedding)."
+            )
         if skipped:
             click.echo(f"Skipped (zero chunks): {', '.join(skipped)}")
         if failed:
             click.echo(f"Failed: {', '.join(failed)}")
-        if skipped or failed:
+        if skipped or failed or prune_refused:
             raise click.ClickException(
-                f"{len(skipped)} Act(s) skipped and {len(failed)} Act(s) failed -- "
-                f"index is incomplete for these Acts (prior entries left in place)."
+                f"{len(skipped)} Act(s) skipped, {len(failed)} Act(s) failed, "
+                f"{'orphan prune refused' if prune_refused else 'no prune issue'} -- "
+                f"index may be incomplete (prior entries left in place)."
             )
     finally:
         # Release the exclusive local-mode lock deterministically -- relying
