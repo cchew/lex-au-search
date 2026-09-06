@@ -12,17 +12,18 @@ tags:
 - rag
 - akn
 pretty_name: lex-au-search-index - Vector Index for AU Legislation Search
+viewer: false
 ---
 
 # lex-au-search-index
 
 **Pre-built Qdrant vector index for hybrid dense + BM25 search over Australian Commonwealth legislation** - download and query, no re-embedding or re-ingest required.
 
-This is the finished output of [lex-au-search](https://github.com/cchew/lex-au-search) run against the [lex-au](https://huggingface.co/datasets/cchew/lex-au) corpus. If you just want to search AU legislation, download this and point the CLI at it - you don't need to run the ingest pipeline yourself.
+This is an output of [lex-au-search](https://github.com/cchew/lex-au-search) run against the [lex-au](https://huggingface.co/datasets/cchew/lex-au) corpus. If you want to search AU legislation, download this and point the CLI at it.
 
 **Version: v0.5.0** - 534,335 chunks (sections, subsections, schedule clauses) across 3,073 Act records, embedded with `snowflake/snowflake-arctic-embed-l` (1024-dim, local ONNX, 512-token context). Corpus pinned at [lex-au commit `f0a89da4`](https://huggingface.co/datasets/cchew/lex-au/commit/f0a89da476227b5f3dbb861be1b666d1234ac501) (2026-08-30).
 
-See [github.com/cchew/lex-au-search](https://github.com/cchew/lex-au-search) for source code, CLI, and MCP server. See [`cchew/lex-au-search-embed-cache`](https://huggingface.co/datasets/cchew/lex-au-search-embed-cache) for the separate raw embedding cache the ingest pipeline itself uses to resume/skip re-embedding - that's a different artifact for a different audience (the pipeline, not a searcher).
+See [github.com/cchew/lex-au-search](https://github.com/cchew/lex-au-search) for source code, CLI, and MCP server. See [`cchew/lex-au-search-embed-cache`](https://huggingface.co/datasets/cchew/lex-au-search-embed-cache) for the separate raw embedding cache the ingest pipeline itself uses to resume/skip re-embedding.
 
 ## Quick example
 
@@ -70,7 +71,7 @@ CC BY 4.0. Source legislation is Crown copyright - Commonwealth of Australia; re
 ## What's built on this
 
 - [ClauseKit](https://github.com/cchew/clause-kit) - LLM extraction of evaluatable rules (JSON Logic) from Acts, run claims against them grounded back to source clauses
-- term-comparison ("Act Alike") - compare how terms are defined across Acts
+- [Act Alike](https://github.com/cchew/act-alike) - compare how terms are defined across Acts
 
 ## Related
 
