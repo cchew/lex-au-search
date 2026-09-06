@@ -9,8 +9,15 @@ corpus/
 dist/
 build/
 .env
-shards/.runpod_pod
-shards/.runpod_pod.lock
+
+# Ingest build artifacts + run output. Home of record is HF
+# (cchew/lex-au-search-embed-cache), not the repo.
+shards/
+logs/
+*.log
+embed_cache.db
+embed_cache.db-shm
+embed_cache.db-wal
 
 # Superpowers planning docs live in the EA wrapper repo, not here
 docs/superpowers/
