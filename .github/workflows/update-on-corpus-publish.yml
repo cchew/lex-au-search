@@ -108,7 +108,7 @@ jobs:
       - name: Publish updated index to Hugging Face
         if: steps.delta.outputs.changed == 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_CACHE_WRITE_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -m lexausearch.hf_cache push-index \
             --storage-dir ./hf-index/qdrant_storage \
@@ -119,7 +119,7 @@ jobs:
       - name: Publish updated embedding cache to Hugging Face
         if: steps.delta.outputs.changed == 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_CACHE_WRITE_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: hf upload cchew/lex-au-search-embed-cache embed_cache.db embed_cache.db --repo-type dataset
 
       - name: Fail the run if ingest-delta reported a partial failure
