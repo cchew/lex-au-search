@@ -135,6 +135,16 @@ lex-au-search ingest-delta --corpus-dir ../lex-au/repo/corpus/ --storage-dir ./q
 
 Changed and new Acts are re-chunked, re-embedded (through the same `--cache-path` embedding cache), and upserted one Act at a time - each Act's old points are deleted first, since points aren't otherwise content-addressed and a re-upsert without deleting first would leave stale duplicates. Unchanged Acts are skipped entirely: no chunking, no embedding, no Qdrant write. A zero-chunk Act (parses but yields no extractable content, e.g. a corpus regression) is skipped without deleting its existing index entry, and is reported in the final summary with a non-zero exit code rather than silently dropped. A single Act's chunking failure (malformed/missing XML) doesn't abort the run - it's logged, that Act's prior index entry is left untouched, and the remaining Acts still get processed; failures are listed in the summary with a non-zero exit code. The very first `ingest-delta` run against a `--storage-dir` built before this feature existed will treat every Act as changed (no baseline hash to compare against) - that's expected, one-time bootstrap behaviour, not a bug. Note that in this bootstrap case, deleting each Act is a full linear scan of the collection's payloads (local-mode `delete(Filter)` has no index for this), run twice per Act across ~3,078 Acts and ~500k points - a plausible hours-long run with peak RAM roughly doubling, since deleted slots aren't reclaimed from the in-memory vector array until the process restarts. If `ingest-delta` reports the *whole* corpus as changed, a fresh full `ingest` is very likely cheaper and safer than letting it churn through the whole corpus one Act at a time.
 
+### Cache garbage collection
+
+`embed_cache.db` is pure content-addressed (`UUID5(chunk_text) -> vector`, no Act linkage), so it only ever grows: `ingest-delta`'s orphan-prune above removes a repealed Act's points from `--storage-dir`, but has no way to know which cache rows belonged only to that Act - cleaning those up is a separate step.
+
+```bash
+lex-au-search gc-cache --corpus-dir ../lex-au/repo/corpus/ --cache-path ./embed_cache.db
+```
+
+This re-chunks the current corpus (cheap - no embedding calls), computes the live `UUID5(chunk_text)` set, and deletes every cache row not in it. Safe by construction: a row is only ever deleted if its exact text is absent from the current corpus, so it can't cause a false cache miss on the next ingest. Chunk text shared verbatim across Acts (e.g. boilerplate transitional clauses) correctly survives one Act's removal as long as another live Act still has that exact text - there's no per-row Act tag to misattribute. Run it opportunistically after a corpus change that removes or substantially edits Acts; skipping it just means some stale rows persist (storage bloat, not a correctness issue).
+
 ### RunPod ingest backend
 
 For faster full-corpus re-ingests, run sharded ingest on RunPod's GPU cloud instead of Colab. Setup:

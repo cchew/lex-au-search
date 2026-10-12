@@ -115,6 +115,36 @@ class EmbedCache:
             for row_id, vec in rows
         }
 
+    def row_count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
+
+    def gc(self, live_texts: set[str]) -> int:
+        """Delete every cache row whose content-addressed id doesn't match a
+        text in live_texts. Returns the number of rows deleted.
+
+        Content-addressed keys mean a row's original text can't be recovered
+        from its id, so the caller must supply the current live-text universe
+        itself (e.g. every chunk text from a fresh chunk_corpus() pass) --
+        this only diffs ids. Deletes in batches: a production cache can carry
+        hundreds of thousands of orphaned rows (updated/removed Acts since
+        the last sweep), well past SQLite's per-statement bound-parameter
+        limit for a single `WHERE id IN (...)`.
+        """
+        live_ids = {self._cache_id(t) for t in live_texts}
+        all_ids = [row[0] for row in self._conn.execute("SELECT id FROM embed_cache").fetchall()]
+        orphan_ids = [i for i in all_ids if i not in live_ids]
+        if not orphan_ids:
+            return 0
+        batch_size = 500
+        for i in range(0, len(orphan_ids), batch_size):
+            batch = orphan_ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            self._conn.execute(
+                f"DELETE FROM embed_cache WHERE id IN ({placeholders})", batch
+            )
+        self._conn.commit()
+        return len(orphan_ids)
+
 
 def merge_cache_files(shard_cache_paths: list[Path | str], output_cache_path: Path | str) -> int:
     """Merge multiple SQLite embed_cache.db files into one. Content-addressed

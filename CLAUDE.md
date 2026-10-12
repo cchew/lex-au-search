@@ -21,6 +21,12 @@ lex-au-search ingest --corpus-dir ../lex-au/repo/corpus/
 # --storage-dir (default ./qdrant_storage) is fully rebuilt every run - delete before re-running.
 # --cache-path (default ./embed_cache.db, SQLite) is a persistent embedding cache - never delete it;
 # re-ingesting an updated corpus skips re-embedding unchanged Acts' text via this cache.
+lex-au-search ingest-delta --corpus-dir ../lex-au/repo/corpus/ --storage-dir ./qdrant_storage
+# Re-indexes only Acts whose content hash changed since the last ingest; prunes removed Acts.
+# --storage-dir must already hold a prior ingest - stop serve/mcp first (exclusive lock).
+lex-au-search gc-cache --corpus-dir ../lex-au/repo/corpus/ --cache-path ./embed_cache.db
+# Deletes embed_cache.db rows for chunk text no longer in the corpus (storage bloat cleanup,
+# not required for correctness). Run opportunistically after Acts are removed/edited.
 lex-au-search serve
 lex-au-search mcp  # requires LEXAU_SEARCH_STORAGE env var
 

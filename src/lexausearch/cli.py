@@ -454,6 +454,39 @@ def ingest_delta(corpus_dir: Path, storage_dir: Path, cache_path: Path) -> None:
         client.close()
 
 
+@cli.command(name="gc-cache")
+@click.option(
+    "--corpus-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Path to lex-au corpus directory (contains index.json and xml/)",
+)
+@click.option(
+    "--cache-path",
+    default="./embed_cache.db",
+    type=click.Path(path_type=Path),
+    show_default=True,
+    help="Path to the persistent SQLite embedding cache to clean up.",
+)
+def gc_cache(corpus_dir: Path, cache_path: Path) -> None:
+    """Delete embed_cache.db rows whose chunk text no longer exists in the
+    corpus. The cache is content-addressed with no Act linkage, so Acts
+    removed or edited since the last ingest leave orphaned rows that
+    ingest-delta's own Qdrant-side orphan-prune never touches -- storage
+    bloat, not a correctness bug. Never deletes a row whose text is still
+    live, so it cannot cause a false cache miss on the next ingest.
+    """
+    click.echo(f"Chunking corpus at {corpus_dir} to compute the live text set ...")
+    live_texts = {c.text for c in chunk_corpus(corpus_dir)}
+    click.echo(f"{len(live_texts)} live chunk text(s).")
+
+    cache = EmbedCache(cache_path)
+    before = cache.row_count()
+    removed = cache.gc(live_texts)
+    after = cache.row_count()
+    click.echo(f"Removed {removed} orphaned row(s) ({before} -> {after}).")
+
+
 @cli.command()
 @click.option(
     "--storage-dir",

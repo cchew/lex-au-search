@@ -643,3 +643,87 @@ def test_merge_shards_from_hf_cleans_up_temp_dir_on_failure(tmp_path, monkeypatc
     ])
     assert r.exit_code != 0
     assert made and not made[0].exists(), "temp dir leaked on the error path"
+
+
+def _write_two_distinct_act_corpus(corpus_dir):
+    """Two Acts with genuinely different chunk text, unlike
+    _write_two_act_corpus's shared body -- needed here because gc-cache diffs
+    on text content, and two Acts sharing identical text would dedupe to the
+    same cache row (one Act's removal can't orphan a row the other still
+    needs)."""
+    xml_dir = corpus_dir / "xml"
+    xml_dir.mkdir()
+    (xml_dir / "privacy-act-1988.xml").write_text(PRIVACY_ACT_XML)
+    (xml_dir / "crimes-act-1914.xml").write_text(
+        PRIVACY_ACT_XML.replace(
+            "personal information means information about an identified individual",
+            "a computer offence means unauthorised access to a computer system",
+        )
+    )
+    index = {
+        "acts": {
+            "privacy-act-1988": {"name": "Privacy Act 1988", "xml_path": "xml/privacy-act-1988.xml"},
+            "crimes-act-1914": {"name": "Crimes Act 1914", "xml_path": "xml/crimes-act-1914.xml"},
+        }
+    }
+    (corpus_dir / "index.json").write_text(json.dumps(index))
+
+
+def test_gc_cache_deletes_rows_for_acts_no_longer_in_the_corpus(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_two_distinct_act_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    from lexausearch.cache import EmbedCache
+    rows_before = EmbedCache(cache_path).row_count()
+    assert rows_before > 0
+
+    # Act repealed (removed from the corpus entirely) -- its chunk texts
+    # become orphans that ingest-delta's own prune never touches (that's
+    # Qdrant-side, this is the content-addressed cache).
+    index_path = corpus_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    del index["acts"]["crimes-act-1914"]
+    index_path.write_text(json.dumps(index))
+    (corpus_dir / "xml" / "crimes-act-1914.xml").unlink()
+
+    result = runner.invoke(cli, [
+        "gc-cache", "--corpus-dir", str(corpus_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+
+    rows_after = EmbedCache(cache_path).row_count()
+    assert 0 < rows_after < rows_before
+
+
+def test_gc_cache_never_deletes_a_row_still_live_in_the_corpus(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _write_corpus(corpus_dir)
+    storage_dir = tmp_path / "storage"
+    cache_path = tmp_path / "cache.db"
+    runner = CliRunner()
+    runner.invoke(cli, [
+        "ingest", "--corpus-dir", str(corpus_dir),
+        "--storage-dir", str(storage_dir), "--cache-path", str(cache_path),
+    ])
+
+    from lexausearch.cache import EmbedCache
+    rows_before = EmbedCache(cache_path).row_count()
+
+    result = runner.invoke(cli, [
+        "gc-cache", "--corpus-dir", str(corpus_dir), "--cache-path", str(cache_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Removed 0" in result.output
+
+    rows_after = EmbedCache(cache_path).row_count()
+    assert rows_after == rows_before
