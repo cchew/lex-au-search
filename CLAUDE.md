@@ -34,6 +34,13 @@ lex-au-search mcp  # requires LEXAU_SEARCH_STORAGE env var
 # One-time: python scripts/bootstrap_hf_cache.py   (needs HF_CACHE_WRITE_TOKEN in .env)
 # Status:   python scripts/check_ingest_status.py
 
+# The merged qdrant_storage/ index also round-trips through HF (cchew/lex-au-search-index),
+# generation-guarded via index-catalogue.json -- same pattern as the embed-cache master.
+# Used by .github/workflows/update-on-corpus-publish.yml for the automatic weekly refresh.
+python -m lexausearch.hf_cache fetch-index --dest ./hf-index --expect-model <DENSE_MODEL>
+python -m lexausearch.hf_cache push-index --storage-dir ./qdrant_storage --model <DENSE_MODEL> \
+  --act-count <n> --chunk-count <n>
+
 ## Tests
 
 pytest

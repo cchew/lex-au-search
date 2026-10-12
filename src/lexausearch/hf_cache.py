@@ -20,10 +20,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from huggingface_hub import HfApi, hf_hub_download, CommitOperationAdd
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download, CommitOperationAdd
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, HfHubHTTPError
 
 _DEFAULT_HF_CACHE_REPO = "cchew/lex-au-search-embed-cache"
+_DEFAULT_HF_INDEX_REPO = "cchew/lex-au-search-index"
+# Same override shape as HF_CACHE_REPO below - a throwaway repo for a smoke
+# run, resolved once at import time since this never needs to change mid-process.
+HF_INDEX_REPO = os.environ.get("LEXAU_HF_INDEX_REPO") or _DEFAULT_HF_INDEX_REPO
+_INDEX_CATALOGUE_NAME = "index-catalogue.json"
 # Resolution order: `--repo` on the CLI > LEXAU_HF_CACHE_REPO in the env >
 # the default. The env var is what carries a smoke run's throwaway repo to a
 # compute VM, where `python -m lexausearch.hf_cache` runs as a fresh process
@@ -319,6 +324,86 @@ def mirror_to_local(shard_index: int, shards_dir: Path, *, token: str | None) ->
               file=sys.stderr)
 
 
+@dataclass(frozen=True)
+class IndexCatalogue:
+    dense_model: str
+    generation: int
+    updated_at: str
+    act_count: int
+    chunk_count: int
+
+
+def read_index_catalogue(*, token: str | None) -> IndexCatalogue | None:
+    """Deliberately its own type, not a reuse of Catalogue - the index
+    catalogue has no shard_size/total_acts concept (one merged store, not
+    N shards)."""
+    try:
+        path = _hf_download(HF_INDEX_REPO, _INDEX_CATALOGUE_NAME, token)
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        return None
+    d = json.loads(Path(path).read_text())
+    return IndexCatalogue(**d)
+
+
+def fetch_storage(dest_dir: Path | str, *, token: str | None,
+                  expect_model: str | None = None) -> tuple[Path, "IndexCatalogue"] | None:
+    """Download the published qdrant_storage/ tree from HF_INDEX_REPO into
+    dest_dir. Returns (storage_path, catalogue), or None if nothing has
+    been published yet - a cold caller should fall back to a full `ingest`
+    rather than `ingest-delta` against a path that doesn't exist."""
+    cat = read_index_catalogue(token=token)
+    if cat is None:
+        return None
+    if expect_model is not None and cat.dense_model != expect_model:
+        raise HfCacheModelMismatch(
+            f"published index model {cat.dense_model!r} != expected {expect_model!r}"
+        )
+    snapshot_download(
+        repo_id=HF_INDEX_REPO, repo_type="dataset", local_dir=str(dest_dir),
+        allow_patterns=["qdrant_storage/**"], token=token,
+    )
+    return Path(dest_dir) / "qdrant_storage", cat
+
+
+def push_storage(storage_dir: Path | str, *, model_name: str, act_count: int,
+                 chunk_count: int, token: str, overwrite: bool = False) -> "IndexCatalogue":
+    """Publish storage_dir (a Qdrant local-mode storage tree) to
+    HF_INDEX_REPO, generation-guarded the same way the embed-cache master
+    push is: refuses to overwrite a differently-modelled published index
+    unless overwrite=True, so an automated CI push and a stale manual
+    rebuild on the laptop can't silently clobber each other's vector space.
+    Uploads the storage tree before the catalogue sidecar, so a reader
+    never sees a catalogue pointing at a not-yet-uploaded generation."""
+    head = read_index_catalogue(token=token)
+    if not overwrite and head is not None and head.dense_model != model_name:
+        raise HfCacheModelMismatch(
+            f"published index model {head.dense_model!r} != {model_name!r}; "
+            f"refusing to push (use overwrite=True to replace)"
+        )
+    gen = 1 if head is None else head.generation + 1
+    cat = IndexCatalogue(dense_model=model_name, generation=gen, updated_at=_now(),
+                         act_count=act_count, chunk_count=chunk_count)
+
+    api = _api()
+    api.upload_folder(
+        repo_id=HF_INDEX_REPO, repo_type="dataset", folder_path=str(storage_dir),
+        path_in_repo="qdrant_storage", token=token,
+        commit_message=f"index: gen {gen} ({act_count} Acts, {chunk_count} chunks)",
+    )
+    with tempfile.TemporaryDirectory() as td:
+        cat_path = Path(td) / _INDEX_CATALOGUE_NAME
+        cat_path.write_text(json.dumps(
+            {"dense_model": cat.dense_model, "generation": cat.generation,
+             "updated_at": cat.updated_at, "act_count": cat.act_count,
+             "chunk_count": cat.chunk_count}, indent=2))
+        api.upload_file(
+            repo_id=HF_INDEX_REPO, repo_type="dataset", path_or_fileobj=str(cat_path),
+            path_in_repo=_INDEX_CATALOGUE_NAME, token=token,
+            commit_message=f"index: gen {gen} catalogue",
+        )
+    return cat
+
+
 def create_cache_repo(*, token: str) -> None:
     api = _api()
     api.create_repo(repo_id=HF_CACHE_REPO, repo_type="dataset", exist_ok=True, token=token)
@@ -360,17 +445,64 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token-file", default=None)
     p.add_argument("--repo", default=None,
                    help="HF dataset repo to write (overrides LEXAU_HF_CACHE_REPO)")
+
+    fi = sub.add_parser("fetch-index", help="Fetch the merged qdrant_storage/ index")
+    fi.add_argument("--dest", required=True)
+    fi.add_argument("--expect-model", default=None)
+    fi.add_argument("--token", default=None)
+    fi.add_argument("--token-file", default=None)
+    fi.add_argument("--repo", default=None,
+                    help="HF dataset repo to read (overrides LEXAU_HF_INDEX_REPO)")
+
+    pi = sub.add_parser("push-index", help="Publish the merged qdrant_storage/ index")
+    pi.add_argument("--storage-dir", required=True)
+    pi.add_argument("--model", required=True)
+    pi.add_argument("--act-count", required=True, type=int)
+    pi.add_argument("--chunk-count", required=True, type=int)
+    pi.add_argument("--overwrite", action="store_true")
+    pi.add_argument("--token", default=None)
+    pi.add_argument("--token-file", default=None)
+    pi.add_argument("--repo", default=None,
+                    help="HF dataset repo to write (overrides LEXAU_HF_INDEX_REPO)")
     return ap
 
 
 def main(argv=None) -> int:
-    global HF_CACHE_REPO
+    global HF_CACHE_REPO, HF_INDEX_REPO
     args = _build_parser().parse_args(argv)
     # `--repo` wins over the env-resolved module default. Set before any HF call
     # so every read/write in this process targets the overridden repo.
-    if args.repo:
+    if args.repo and args.verb in ("fetch-index", "push-index"):
+        HF_INDEX_REPO = args.repo
+    elif args.repo:
         HF_CACHE_REPO = args.repo
     token = _resolve_token(args.token, args.token_file)
+    if args.verb == "fetch-index":
+        try:
+            result = fetch_storage(Path(args.dest), token=token, expect_model=args.expect_model)
+            print("cold start (no published index)" if result is None
+                  else f"fetched index gen {result[1].generation} "
+                       f"({result[1].act_count} Acts, {result[1].chunk_count} chunks) -> {result[0]}")
+            return 0
+        except HfCacheModelMismatch as e:
+            print(f"MODEL MISMATCH: {e}", file=sys.stderr)
+            return 4
+        except Exception as e:  # noqa: BLE001
+            print(f"fetch-index failed: {e}", file=sys.stderr)
+            return 1
+    if args.verb == "push-index":
+        try:
+            cat = push_storage(Path(args.storage_dir), model_name=args.model,
+                               act_count=args.act_count, chunk_count=args.chunk_count,
+                               token=token, overwrite=args.overwrite)
+            print(f"pushed index gen {cat.generation} ({cat.act_count} Acts, {cat.chunk_count} chunks)")
+            return 0
+        except HfCacheModelMismatch as e:
+            print(f"HEAD MODEL MISMATCH: {e}", file=sys.stderr)
+            return 4
+        except Exception as e:  # noqa: BLE001
+            print(f"push-index failed: {e}", file=sys.stderr)
+            return 1
     if args.verb == "fetch":
         try:
             meta = fetch_shard_cache(args.index, Path(args.dest), token=token,

@@ -452,3 +452,150 @@ def test_sha256_file_is_chunked_not_slurped(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "read_bytes", _boom)
     assert hf_cache._sha256_file(p) == _hashlib.sha256(data).hexdigest()
+
+
+# ------------------------------------------------- merged-index fetch/push
+
+def test_read_index_catalogue_absent_returns_none(monkeypatch):
+    def _raise(*a, **k):
+        raise EntryNotFoundError("no catalogue")
+    monkeypatch.setattr(hf_cache, "_hf_download", _raise)
+    assert hf_cache.read_index_catalogue(token=None) is None
+
+
+def test_read_index_catalogue_parses(monkeypatch, tmp_path):
+    cat = tmp_path / "index-catalogue.json"
+    cat.write_text('{"dense_model": "m", "generation": 3, "updated_at": "t", '
+                   '"act_count": 3076, "chunk_count": 534335}')
+    monkeypatch.setattr(hf_cache, "_hf_download", lambda repo, filename, token: str(cat))
+    c = hf_cache.read_index_catalogue(token=None)
+    assert c.generation == 3 and c.act_count == 3076
+
+
+def test_fetch_storage_cold_returns_none(monkeypatch):
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: None)
+    assert hf_cache.fetch_storage("dest", token=None) is None
+
+
+def test_fetch_storage_model_mismatch_raises(monkeypatch):
+    monkeypatch.setattr(hf_cache, "read_index_catalogue",
+                        lambda token: hf_cache.IndexCatalogue("old", 1, "t", 1, 1))
+    with pytest.raises(hf_cache.HfCacheModelMismatch):
+        hf_cache.fetch_storage("dest", token=None, expect_model="new")
+
+
+def test_fetch_storage_downloads_and_returns_path(tmp_path, monkeypatch):
+    cat = hf_cache.IndexCatalogue("m", 2, "t", 10, 100)
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: cat)
+    calls = {}
+    def _sd(**kwargs):
+        calls.update(kwargs)
+    monkeypatch.setattr(hf_cache, "snapshot_download", _sd)
+
+    result = hf_cache.fetch_storage(tmp_path, token="t")
+
+    assert result == (tmp_path / "qdrant_storage", cat)
+    assert calls["repo_id"] == hf_cache.HF_INDEX_REPO
+    assert calls["allow_patterns"] == ["qdrant_storage/**"]
+    assert calls["local_dir"] == str(tmp_path)
+
+
+class _FakeIndexApi:
+    def __init__(self):
+        self.uploaded_folders = []
+        self.uploaded_files = []
+        self.call_order = []
+
+    def upload_folder(self, **kwargs):
+        self.uploaded_folders.append(kwargs)
+        self.call_order.append("folder")
+
+    def upload_file(self, **kwargs):
+        self.uploaded_files.append(kwargs)
+        self.call_order.append("file")
+
+
+def test_push_storage_first_publish_is_generation_1(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: None)
+    fake = _FakeIndexApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+
+    cat = hf_cache.push_storage(tmp_path, model_name="m", act_count=5, chunk_count=50, token="t")
+
+    assert cat.generation == 1
+    assert len(fake.uploaded_folders) == 1
+    assert fake.uploaded_folders[0]["path_in_repo"] == "qdrant_storage"
+    assert len(fake.uploaded_files) == 1
+    assert fake.uploaded_files[0]["path_in_repo"] == "index-catalogue.json"
+    # Storage uploaded before the catalogue sidecar that points at it.
+    assert fake.call_order == ["folder", "file"]
+
+
+def test_push_storage_bumps_generation_on_existing_head(tmp_path, monkeypatch):
+    head = hf_cache.IndexCatalogue("m", 4, "t", 1, 1)
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: head)
+    monkeypatch.setattr(hf_cache, "_api", lambda: _FakeIndexApi())
+
+    cat = hf_cache.push_storage(tmp_path, model_name="m", act_count=5, chunk_count=50, token="t")
+
+    assert cat.generation == 5
+
+
+def test_push_storage_model_mismatch_refuses_without_overwrite(tmp_path, monkeypatch):
+    head = hf_cache.IndexCatalogue("old-model", 4, "t", 1, 1)
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: head)
+    fake = _FakeIndexApi()
+    monkeypatch.setattr(hf_cache, "_api", lambda: fake)
+
+    with pytest.raises(hf_cache.HfCacheModelMismatch):
+        hf_cache.push_storage(tmp_path, model_name="new-model", act_count=1, chunk_count=1, token="t")
+    assert not fake.uploaded_folders  # refused before any upload
+
+
+def test_push_storage_overwrite_ignores_model_mismatch(tmp_path, monkeypatch):
+    head = hf_cache.IndexCatalogue("old-model", 4, "t", 1, 1)
+    monkeypatch.setattr(hf_cache, "read_index_catalogue", lambda token: head)
+    monkeypatch.setattr(hf_cache, "_api", lambda: _FakeIndexApi())
+
+    cat = hf_cache.push_storage(tmp_path, model_name="new-model", act_count=1, chunk_count=1,
+                                token="t", overwrite=True)
+
+    assert cat.generation == 5
+    assert cat.dense_model == "new-model"
+
+
+def test_cli_fetch_index_exit_0_on_cold(tmp_path, monkeypatch):
+    monkeypatch.setattr(hf_cache, "fetch_storage", lambda *a, **k: None)
+    assert hf_cache.main(["fetch-index", "--dest", str(tmp_path)]) == 0
+
+
+def test_cli_fetch_index_exit_4_on_model_mismatch(tmp_path, monkeypatch):
+    def _mm(*a, **k):
+        raise hf_cache.HfCacheModelMismatch("nope")
+    monkeypatch.setattr(hf_cache, "fetch_storage", _mm)
+    assert hf_cache.main(["fetch-index", "--dest", str(tmp_path), "--expect-model", "new"]) == 4
+
+
+def test_cli_push_index_exit_0(tmp_path, monkeypatch):
+    cat = hf_cache.IndexCatalogue("m", 1, "t", 1, 1)
+    monkeypatch.setattr(hf_cache, "push_storage", lambda *a, **k: cat)
+    rc = hf_cache.main(["push-index", "--storage-dir", str(tmp_path), "--model", "m",
+                       "--act-count", "1", "--chunk-count", "1"])
+    assert rc == 0
+
+
+def test_cli_push_index_exit_4_on_model_mismatch(tmp_path, monkeypatch):
+    def _mm(*a, **k):
+        raise hf_cache.HfCacheModelMismatch("nope")
+    monkeypatch.setattr(hf_cache, "push_storage", _mm)
+    rc = hf_cache.main(["push-index", "--storage-dir", str(tmp_path), "--model", "m",
+                       "--act-count", "1", "--chunk-count", "1"])
+    assert rc == 4
+
+
+def test_cli_index_repo_override_sets_module_global(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(hf_cache, "fetch_storage",
+                        lambda *a, **k: seen.setdefault("repo", hf_cache.HF_INDEX_REPO))
+    hf_cache.main(["fetch-index", "--dest", str(tmp_path), "--repo", "env/set-index"])
+    assert seen["repo"] == "env/set-index"
