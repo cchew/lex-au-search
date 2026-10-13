@@ -36,6 +36,49 @@ from lexausearch.chunker import chunk_corpus
 from lexausearch.indexer import DENSE_MODEL, configure_client
 
 _BATCH_SIZE = 32
+_OOM_SIGNATURE = "Failed to allocate memory"
+
+
+def embed_batch_with_oom_backoff(client, cache: EmbedCache, batch: list[str]) -> None:
+    """Embed one batch and cache it; on an onnxruntime OOM, halve the batch
+    and retry each half instead of aborting the whole run.
+
+    Real failure 2026-10-13: a run already 78,752/94,289 through (83%)
+    died on onnxruntime's BFCArena failing to allocate ~445MB for an Add
+    node. unique_misses_length_bucketed sorts misses ascending by length,
+    so later batches skew toward the corpus's longest texts -- the fixed
+    --batch-size that comfortably fit the first 83% can still blow the T4's
+    VRAM budget near the tail, and a straight resume hits the same wall
+    again almost immediately since the remaining misses are exactly the
+    longest ones left. Halving on OOM (down to a floor of 1 text, at which
+    point a failure is genuine and left to propagate) finishes the run
+    instead of losing it to one bad batch of long documents. Matched on
+    the error message rather than a specific onnxruntime exception class --
+    any other failure (bad input, corrupt cache, etc.) re-raises unchanged
+    rather than being silently retried as if it were memory pressure."""
+    if len(batch) > 1:
+        try:
+            _embed_and_cache(client, cache, batch)
+            return
+        except Exception as e:
+            if _OOM_SIGNATURE not in str(e):
+                raise
+            mid = len(batch) // 2
+            print(f"    OOM on batch of {len(batch)} texts -- splitting into "
+                  f"{mid} + {len(batch) - mid} and retrying")
+            embed_batch_with_oom_backoff(client, cache, batch[:mid])
+            embed_batch_with_oom_backoff(client, cache, batch[mid:])
+            return
+    _embed_and_cache(client, cache, batch)  # floor of 1 -- let a real failure surface
+
+
+def _embed_and_cache(client, cache: EmbedCache, batch: list[str]) -> None:
+    fresh = dict(
+        client._embed_documents(
+            batch, embedding_model_name=client.embedding_model_name, embed_type="passage"
+        )
+    )
+    cache.put_batch(fresh)
 
 
 def unique_misses_length_bucketed(all_texts: list[str], hits: set[str]) -> list[str]:
@@ -100,12 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     total = len(miss_texts)
     for i in range(0, total, args.batch_size):
         batch = miss_texts[i : i + args.batch_size]
-        fresh = dict(
-            client._embed_documents(
-                batch, embedding_model_name=client.embedding_model_name, embed_type="passage"
-            )
-        )
-        cache.put_batch(fresh)
+        embed_batch_with_oom_backoff(client, cache, batch)
         done = min(i + args.batch_size, total)
         print(f"  [{done}/{total}] embedded + cached")
 
