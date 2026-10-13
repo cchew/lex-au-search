@@ -75,6 +75,19 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: hf download cchew/lex-au-search-embed-cache embed_cache.db --repo-type dataset --local-dir .
 
+      # TEMPORARY diagnostic, remove once the ingest-delta cancellation
+      # (two reproductions, both ~52-53s in, right as onnxruntime + a
+      # 534K-point local-mode Qdrant collection load) is root-caused.
+      # GitHub's hosted runners don't surface OOM explicitly -- a killed
+      # job process just shows up as "The operation was canceled." A
+      # background free -m sampler is a separate, negligible-memory
+      # process, so it survives an OOM kill of the ingest-delta process
+      # and gives a trend right up to the moment of cancellation.
+      - name: Start memory sampler
+        run: |
+          ( while true; do date -u +%H:%M:%S; free -m; echo; sleep 2; done ) > mem.log &
+          echo $! > mem_sampler.pid
+
       - name: Run ingest-delta
         id: delta
         # ingest-delta intentionally exits non-zero on a PARTIAL failure (a
@@ -99,6 +112,12 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Print memory sample log
+        if: always()
+        run: |
+          kill "$(cat mem_sampler.pid)" 2>/dev/null || true
+          tail -n 40 mem.log || true
 
       - name: Report index counts
         if: steps.delta.outputs.changed == 'true'
