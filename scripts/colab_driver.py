@@ -60,6 +60,27 @@ def _parse_pid_output(stdout: str) -> int:
     return int(match.group(1))
 
 
+def _probe_tokens(stdout: str) -> list[str]:
+    """Extract the probe's own `<ALIVE|DEAD> <content>` tokens from exec
+    output, ignoring whatever else `colab exec` printed first.
+
+    Real failure 2026-10-13: the `colab` CLI now prints a "new version
+    available" nag banner (multi-line, to stdout) ahead of the actual
+    probe output on every single exec call. `_parse_poll_output` and
+    `_format_diagnosis` both used to do a blind `stdout.split()` over the
+    *entire* output, so the banner's own words shifted every token
+    position - `parts[1]` became a word from the banner text ("version"),
+    never the real RUNNING/DEAD/exit-code content. That misreported a
+    genuinely healthy, actively-running job as "failed" on every poll.
+    Scan from the end for the last line starting with ALIVE/DEAD - the
+    probe always prints its token pair last, after any banner noise."""
+    for line in reversed(stdout.splitlines()):
+        parts = line.split()
+        if parts and parts[0] in ("ALIVE", "DEAD"):
+            return parts
+    return []
+
+
 def _parse_poll_output(stdout: str) -> str:
     """Classify a poll probe. Probe prints two tokens: `<ALIVE|DEAD> <content>`
     where content is the job.exitcode file's contents - `RUNNING` (sentinel
@@ -72,7 +93,7 @@ def _parse_poll_output(stdout: str) -> str:
     misreports a shard that finished between two polls. A genuine kernel kill
     is caught elsewhere - the probe's own `colab exec` fails and poll_status
     returns `session_lost` - not here."""
-    parts = stdout.split()
+    parts = _probe_tokens(stdout)
     if len(parts) < 2:
         return "failed"  # malformed probe output - treat as a failure to surface it
     content = parts[1]
@@ -181,8 +202,8 @@ def poll_status(name: str, pid: int, exit_code_path: str = "job.exitcode") -> st
 
 
 def _format_diagnosis(stdout: str) -> str:
-    parts = stdout.split()
-    if not parts or parts[0] not in ("ALIVE", "DEAD"):
+    parts = _probe_tokens(stdout)
+    if not parts:
         # The probe itself never ran - no ALIVE/DEAD token came back, so the
         # remote VM is unreachable (typically `colab exec` printing "Session
         # 'NAME' not found" after Colab dropped the runtime and the local

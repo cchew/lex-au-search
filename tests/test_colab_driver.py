@@ -40,6 +40,28 @@ def test_parse_poll_output_running_when_alive_and_sentinel_present():
     assert _parse_poll_output("ALIVE RUNNING\n") == "running"
 
 
+_CLI_NAG_BANNER = (
+    "\n[colab] A new version of Colab CLI is available: 0.7.4 (current: 0.6.0)\n"
+    "[colab] Run 'colab update' to update.\n"
+    "[colab] To silence this check, set \"enable_update_check\": false in "
+    "~/.config/colab-cli/settings.json\n\n"
+)
+
+
+def test_parse_poll_output_ignores_cli_update_banner_ahead_of_probe_line():
+    # Real failure 2026-10-13: a blind stdout.split() over the whole exec
+    # output (banner + probe) shifted every token position, so a genuinely
+    # healthy, actively-running job got misreported as "failed" on every
+    # single poll -- "version" (from the banner) was read as the sentinel
+    # content instead of "RUNNING".
+    assert _parse_poll_output(_CLI_NAG_BANNER + "ALIVE RUNNING\n") == "running"
+
+
+def test_format_diagnosis_ignores_cli_update_banner_ahead_of_probe_line():
+    out = _format_diagnosis(_CLI_NAG_BANNER + "DEAD 0\n")
+    assert out == "exited with code 0 (job.exitcode written)"
+
+
 def test_parse_poll_output_done_on_zero_exit_code():
     assert _parse_poll_output("DEAD 0\n") == "done"
 
