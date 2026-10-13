@@ -74,6 +74,60 @@ def test_get_batch_mixed_hits_and_misses_across_batches(tmp_path):
     assert all(f"missing {i}" not in hits for i in range(n))
 
 
+def test_contains_batch_returns_a_vector_free_set_of_hits(tmp_path):
+    """Real OOM 2026-10-13, reproduced identically across 4 independent
+    attempts (3 browser-driven Colab + 1 CLI-driven): a corpus-wide cache
+    check that pulls full 1024-float vectors for every hit via get_batch()
+    accumulates hundreds of thousands of boxed-float lists in memory for
+    data the caller only ever uses as a presence check -- contains_batch
+    must never touch the vector column at all."""
+    cache = EmbedCache(tmp_path / "cache.db")
+    cache.put_batch({"hit one": [0.1] * 1024, "hit two": [0.2] * 1024})
+
+    result = cache.contains_batch(["hit one", "hit two", "a miss"])
+
+    assert result == {"hit one", "hit two"}
+
+
+def test_contains_batch_batches_past_the_sqlite_bound_variable_limit(tmp_path):
+    cache = EmbedCache(tmp_path / "cache.db")
+    n = 1500
+    cache.put_batch({f"text {i}": [float(i)] for i in range(n)})
+
+    select_statements = []
+    cache._conn.set_trace_callback(
+        lambda sql: select_statements.append(sql) if "WHERE id IN" in sql and "SELECT" in sql else None
+    )
+    result = cache.contains_batch([f"text {i}" for i in range(n)])
+    cache._conn.set_trace_callback(None)
+
+    assert result == {f"text {i}" for i in range(n)}
+    assert len(select_statements) >= 3, select_statements
+
+
+def test_contains_batch_empty_input_returns_empty_set(tmp_path):
+    cache = EmbedCache(tmp_path / "cache.db")
+    assert cache.contains_batch([]) == set()
+
+
+def test_contains_batch_query_never_selects_the_vector_column(tmp_path):
+    """Lock in the contract directly, not just the memory-usage symptom --
+    a future 'optimization' that reuses get_batch() internally would
+    silently reintroduce the exact OOM this method exists to avoid."""
+    cache = EmbedCache(tmp_path / "cache.db")
+    cache.put("hit", [0.1] * 1024)
+
+    queries = []
+    cache._conn.set_trace_callback(
+        lambda sql: queries.append(sql) if "SELECT" in sql else None
+    )
+    cache.contains_batch(["hit"])
+    cache._conn.set_trace_callback(None)
+
+    assert queries, "expected at least one SELECT"
+    assert all("vector" not in q for q in queries), queries
+
+
 def test_gc_deletes_rows_whose_text_is_no_longer_live(tmp_path):
     cache = EmbedCache(tmp_path / "cache.db")
     cache.put_batch({

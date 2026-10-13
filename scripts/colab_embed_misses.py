@@ -38,7 +38,7 @@ from lexausearch.indexer import DENSE_MODEL, configure_client
 _BATCH_SIZE = 32
 
 
-def unique_misses_length_bucketed(all_texts: list[str], hits: dict[str, list[float]]) -> list[str]:
+def unique_misses_length_bucketed(all_texts: list[str], hits: set[str]) -> list[str]:
     """Every distinct cache-miss text, sorted by length. Dedup matters:
     the same chunk text can repeat across chunks/Acts (shared boilerplate),
     and the cache is content-addressed, so embedding it twice is wasted
@@ -66,19 +66,24 @@ def main(argv: list[str] | None = None) -> int:
 
     cache = EmbedCache(args.cache_path, model_name=DENSE_MODEL)
     print("Checking cache ...")
-    # Chunked with progress output, not one cache.get_batch(distinct_texts)
+    # Chunked with progress output, not one cache.contains_batch(distinct_texts)
     # call -- a real run (402K distinct texts) went silent here for long
-    # enough that something interrupted it (KeyboardInterrupt, cause
-    # unconfirmed -- caffeinate and foreground tab both ruled out). get_batch
-    # itself already batches its SQL correctly; this is purely about this
-    # script having zero visibility into a step covering hundreds of
-    # thousands of texts. If it stalls again, the printed progress says
-    # exactly how far it got.
+    # enough that something interrupted it; printed progress says exactly
+    # how far it got if that happens again.
+    #
+    # contains_batch(), not get_batch(): real OOM 2026-10-13, reproduced
+    # identically across 4 independent attempts, consistently dying right
+    # around 80% through this exact loop. get_batch() pulls a full
+    # 1024-float vector per hit; accumulating ~320K of those in `hits` is
+    # hundreds of thousands of boxed-float Python lists (~24 bytes/float)
+    # for data this script never uses -- it only ever checks set
+    # membership to build the miss list below. contains_batch() never
+    # reads the vector column at all.
     check_batch_size = 20000
-    hits: dict[str, list[float]] = {}
+    hits: set[str] = set()
     for i in range(0, len(distinct_texts), check_batch_size):
         sub = distinct_texts[i : i + check_batch_size]
-        hits.update(cache.get_batch(sub))
+        hits.update(cache.contains_batch(sub))
         done = min(i + check_batch_size, len(distinct_texts))
         print(f"  checked {done}/{len(distinct_texts)} distinct texts ({len(hits)} hits so far)")
     miss_texts = unique_misses_length_bucketed(distinct_texts, hits)

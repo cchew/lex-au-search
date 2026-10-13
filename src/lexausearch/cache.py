@@ -126,6 +126,32 @@ class EmbedCache:
                 results[id_to_text[row_id]] = np.frombuffer(vec, dtype=np.float32).tolist()
         return results
 
+    def contains_batch(self, texts: list[str]) -> set[str]:
+        """Return the subset of texts already cached, without ever reading
+        the vector column.
+
+        Real OOM 2026-10-13, reproduced identically across 4 independent
+        attempts: a corpus-wide cache-warm check that used get_batch() for
+        this same presence-only question accumulated hundreds of thousands
+        of 1024-float Python lists in memory (boxed floats, ~24 bytes
+        each) for vectors the caller never actually used - it only ever
+        checked `if text not in hits`. Same batching as get_batch(), just
+        selecting `id` alone."""
+        if not texts:
+            return set()
+        id_to_text = {self._cache_id(t): t for t in texts}
+        ids = list(id_to_text.keys())
+        batch_size = 500
+        present: set[str] = set()
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            rows = self._conn.execute(
+                f"SELECT id FROM embed_cache WHERE id IN ({placeholders})", batch
+            ).fetchall()
+            present.update(id_to_text[row_id] for (row_id,) in rows)
+        return present
+
     def row_count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
 
