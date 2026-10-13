@@ -6,6 +6,8 @@ __pycache__/
 .coverage
 qdrant_storage/
 corpus/
+hf-corpus/
+hf-index/
 dist/
 build/
 .env
