@@ -20,6 +20,17 @@ pip uninstall -y onnxruntime onnxruntime-gpu
 pip install onnxruntime-gpu==1.27.0 --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 pip install "nvidia-cudnn-cu12>=9,<10"
 
+# onnxruntime-gpu 1.27.0's CUDA-12 build also needs libcudart.so.12 (the CUDA
+# Runtime library - distinct from cuBLAS/cuDNN above) on the loader path.
+# Found missing on a fresh Python 3.13 Colab image (2026-10-13) even with
+# cuDNN/cuBLAS resolving fine - see setup_gpu_env.sh's identical fix for the
+# full explanation (this script duplicates that install block rather than
+# calling it).
+cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)"
+if [ -n "$cudart_path" ]; then
+  export LD_LIBRARY_PATH="$(dirname "$cudart_path"):${LD_LIBRARY_PATH:-}"
+fi
+
 # Real GPU check - a silent CPU fall-back is invisible to
 # get_available_providers() (it lists build-time providers, not runtime loads).
 python3 scripts/_verify_gpu.py

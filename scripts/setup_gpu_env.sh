@@ -30,6 +30,21 @@ pip uninstall -y onnxruntime onnxruntime-gpu
 pip install onnxruntime-gpu==1.27.0 --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 pip install "nvidia-cudnn-cu12>=9,<10"
 
+# onnxruntime-gpu 1.27.0's CUDA-12 build also needs libcudart.so.12 (the CUDA
+# Runtime library - distinct from cuBLAS/cuDNN above) on the loader path.
+# Found missing on a fresh Python 3.13 Colab image (2026-10-13) even with
+# cuDNN/cuBLAS resolving fine: `nvidia-cuda-runtime-cu12` (already a
+# transitive pip dep here) ships it under its own site-packages path, which
+# is never on LD_LIBRARY_PATH by default - unlike a system CUDA toolkit
+# install, preload_dlls() doesn't reach into pip-installed package dirs for
+# this particular library. Find it and export its directory; a system-wide
+# install (if one exists) is found just as well, so this is a no-op where
+# the library was already resolvable.
+cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)"
+if [ -n "$cudart_path" ]; then
+  export LD_LIBRARY_PATH="$(dirname "$cudart_path"):${LD_LIBRARY_PATH:-}"
+fi
+
 # Real GPU check - a silent CPU fall-back is invisible to
 # get_available_providers(), so force an actual CUDA InferenceSession.
 python3 "$here/_verify_gpu.py"
