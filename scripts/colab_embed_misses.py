@@ -17,8 +17,17 @@ Usage (after scripts/colab_ingest.sh's GPU setup steps, see README
 from __future__ import annotations
 
 import argparse
+import functools
 import sys
 from pathlib import Path
+
+# print() output can be fully buffered (not line-buffered) when stdout isn't
+# a real TTY -- the common case for a notebook's `!python script.py` cell.
+# Without this, the progress lines below (added after a real run went silent
+# for long enough that something interrupted it) could sit in the buffer and
+# never actually reach the Colab output pane until the buffer filled or the
+# process exited, defeating the point of adding them.
+print = functools.partial(print, flush=True)
 
 from qdrant_client import QdrantClient
 
@@ -52,13 +61,27 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Chunking corpus at {args.corpus_dir} ...")
     chunks = chunk_corpus(args.corpus_dir)
-    all_texts = [c.text for c in chunks]
-    print(f"{len(chunks)} total chunk instances, {len(set(all_texts))} distinct texts.")
+    distinct_texts = sorted({c.text for c in chunks})
+    print(f"{len(chunks)} total chunk instances, {len(distinct_texts)} distinct texts.")
 
     cache = EmbedCache(args.cache_path, model_name=DENSE_MODEL)
     print("Checking cache ...")
-    hits = cache.get_batch(all_texts)
-    miss_texts = unique_misses_length_bucketed(all_texts, hits)
+    # Chunked with progress output, not one cache.get_batch(distinct_texts)
+    # call -- a real run (402K distinct texts) went silent here for long
+    # enough that something interrupted it (KeyboardInterrupt, cause
+    # unconfirmed -- caffeinate and foreground tab both ruled out). get_batch
+    # itself already batches its SQL correctly; this is purely about this
+    # script having zero visibility into a step covering hundreds of
+    # thousands of texts. If it stalls again, the printed progress says
+    # exactly how far it got.
+    check_batch_size = 20000
+    hits: dict[str, list[float]] = {}
+    for i in range(0, len(distinct_texts), check_batch_size):
+        sub = distinct_texts[i : i + check_batch_size]
+        hits.update(cache.get_batch(sub))
+        done = min(i + check_batch_size, len(distinct_texts))
+        print(f"  checked {done}/{len(distinct_texts)} distinct texts ({len(hits)} hits so far)")
+    miss_texts = unique_misses_length_bucketed(distinct_texts, hits)
     print(f"{len(hits)} cache hits, {len(miss_texts)} distinct misses to embed.")
 
     if not miss_texts:
