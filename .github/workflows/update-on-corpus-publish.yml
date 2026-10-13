@@ -75,19 +75,18 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: hf download cchew/lex-au-search-embed-cache embed_cache.db --repo-type dataset --local-dir .
 
-      # TEMPORARY diagnostic, remove once the ingest-delta cancellation
-      # (two reproductions, both ~52-53s in, right as onnxruntime + a
-      # 534K-point local-mode Qdrant collection load) is root-caused.
-      # GitHub's hosted runners don't surface OOM explicitly -- a killed
-      # job process just shows up as "The operation was canceled." A
-      # background free -m sampler is a separate, negligible-memory
-      # process, so it survives an OOM kill of the ingest-delta process
-      # and gives a trend right up to the moment of cancellation.
-      - name: Start memory sampler
-        run: |
-          ( while true; do date -u +%H:%M:%S; free -m; echo; sleep 2; done ) > mem.log &
-          echo $! > mem_sampler.pid
-
+      # TEMPORARY diagnostic, remove once the ingest-delta cancellation is
+      # root-caused. Three reproductions so far: two cancelled ~52-53s in
+      # (run-level "canceled", no exit code -- the memory-sampler-in-a-
+      # later-step approach that caught nothing, since a later step never
+      # got to run after that), one killed with SIGTERM (exit 143) after
+      # ~2m23s -- inconsistent timing rules out a fixed memory ceiling hit
+      # at the same point every run. This version streams BOTH a free -m
+      # sampler and ingest-delta's own stdout live in THIS SAME step, via
+      # `tee` instead of `$(...)` capture -- `$(...)` buffers everything
+      # until the subshell exits cleanly, so a mid-run kill previously lost
+      # 100% of ingest-delta's own progress output, the exact visibility
+      # needed to tell which Act/stage it actually died at.
       - name: Run ingest-delta
         id: delta
         # ingest-delta intentionally exits non-zero on a PARTIAL failure (a
@@ -96,28 +95,25 @@ jobs:
         # that resilience is the whole point of its design (see README). The
         # corpus already has 9 documented zero-chunk Acts, so this isn't a
         # hypothetical: under the step's default `set -e`, that non-zero exit
-        # would kill the step before `echo "$output"` or the changed-flag
-        # logic ever ran, silently discarding real work instead of pushing
-        # the partial result. `set +e` + explicit $? capture keeps the step
-        # alive long enough to decide what actually happened.
+        # would kill the step before the changed-flag logic ever ran,
+        # discarding real work instead of pushing the partial result.
+        # `set +e` + explicit $? capture keeps the step alive long enough to
+        # decide what actually happened.
         run: |
           set +e
-          output=$(lex-au-search ingest-delta --corpus-dir corpus --storage-dir ./hf-index/qdrant_storage --cache-path ./embed_cache.db)
-          rc=$?
+          ( while true; do date -u +%H:%M:%S; free -m; echo; sleep 5; done ) &
+          sampler_pid=$!
+          lex-au-search ingest-delta --corpus-dir corpus --storage-dir ./hf-index/qdrant_storage --cache-path ./embed_cache.db 2>&1 | tee ingest_output.log
+          rc=${PIPESTATUS[0]}
+          kill "$sampler_pid" 2>/dev/null
           set -e
-          echo "$output"
+          output=$(cat ingest_output.log)
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           if echo "$output" | grep -q "Nothing to do"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Print memory sample log
-        if: always()
-        run: |
-          kill "$(cat mem_sampler.pid)" 2>/dev/null || true
-          tail -n 40 mem.log || true
 
       - name: Report index counts
         if: steps.delta.outputs.changed == 'true'
