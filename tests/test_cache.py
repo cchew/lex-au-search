@@ -27,6 +27,53 @@ def test_merge_cache_files_closes_output_connection(tmp_path):
         conn.close()
 
 
+def test_get_batch_never_issues_a_query_past_the_safe_placeholder_count(tmp_path):
+    """Real failure 2026-10-13: a corpus-wide cache check against ~402K
+    distinct chunk texts crashed on a Colab Python 3.13 build with
+    sqlite3.OperationalError: too many SQL variables -- get_batch built
+    one query with a placeholder per text. SQLITE_MAX_VARIABLE_NUMBER is
+    compile-time and varies by build (this repo's own .venv tolerates
+    400K+ fine, so the fix can't be tested by just picking a big N and
+    expecting a crash locally) -- assert the implementation issues
+    multiple smaller SELECTs rather than one giant one, same batching
+    already applied to gc()'s delete path. set_trace_callback is the
+    real per-instance sqlite3 hook for this (Connection itself is an
+    immutable C type -- its methods can't be monkeypatched)."""
+    cache = EmbedCache(tmp_path / "cache.db")
+    n = 1500
+    cache.put_batch({f"text {i}": [float(i)] for i in range(n)})
+
+    select_statements = []
+    cache._conn.set_trace_callback(
+        lambda sql: select_statements.append(sql) if "WHERE id IN" in sql and "SELECT" in sql else None
+    )
+
+    hits = cache.get_batch([f"text {i}" for i in range(n)])
+    cache._conn.set_trace_callback(None)
+
+    assert len(hits) == n
+    assert hits["text 0"] == pytest.approx([0.0])
+    assert hits["text 1499"] == pytest.approx([1499.0])
+    # 1500 inputs batched at <=500/query must take at least 3 SELECTs --
+    # the pre-fix code issues exactly 1, with 1500 placeholders in it.
+    assert len(select_statements) >= 3, select_statements
+
+
+def test_get_batch_mixed_hits_and_misses_across_batches(tmp_path):
+    cache = EmbedCache(tmp_path / "cache.db")
+    n = 1500
+    cache.put_batch({f"text {i}": [float(i)] for i in range(n)})
+
+    # Half of these exist, half don't -- misses must be silently absent,
+    # not raise, same contract as the small-input case, across multiple
+    # internal batches.
+    query = [f"text {i}" for i in range(n)] + [f"missing {i}" for i in range(n)]
+    hits = cache.get_batch(query)
+
+    assert len(hits) == n
+    assert all(f"missing {i}" not in hits for i in range(n))
+
+
 def test_gc_deletes_rows_whose_text_is_no_longer_live(tmp_path):
     cache = EmbedCache(tmp_path / "cache.db")
     cache.put_batch({

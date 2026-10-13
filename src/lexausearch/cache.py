@@ -101,19 +101,30 @@ class EmbedCache:
         self._conn.commit()
 
     def get_batch(self, texts: list[str]) -> dict[str, list[float]]:
-        """Return {text: vector} for all cache hits. Misses are absent."""
+        """Return {text: vector} for all cache hits. Misses are absent.
+
+        Batches the lookup: a corpus-wide check (hundreds of thousands of
+        distinct texts, e.g. a full re-ingest's cache-warm check) crashed
+        on a real run with sqlite3.OperationalError: too many SQL
+        variables -- one query with a placeholder per text exceeded that
+        build's SQLITE_MAX_VARIABLE_NUMBER (compile-time, varies by
+        platform/Python build). Same fix shape as gc()'s delete batching.
+        """
         if not texts:
             return {}
         id_to_text = {self._cache_id(t): t for t in texts}
-        placeholders = ",".join("?" * len(id_to_text))
-        rows = self._conn.execute(
-            f"SELECT id, vector FROM embed_cache WHERE id IN ({placeholders})",
-            list(id_to_text.keys()),
-        ).fetchall()
-        return {
-            id_to_text[row_id]: np.frombuffer(vec, dtype=np.float32).tolist()
-            for row_id, vec in rows
-        }
+        ids = list(id_to_text.keys())
+        batch_size = 500
+        results: dict[str, list[float]] = {}
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            rows = self._conn.execute(
+                f"SELECT id, vector FROM embed_cache WHERE id IN ({placeholders})", batch
+            ).fetchall()
+            for row_id, vec in rows:
+                results[id_to_text[row_id]] = np.frombuffer(vec, dtype=np.float32).tolist()
+        return results
 
     def row_count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
