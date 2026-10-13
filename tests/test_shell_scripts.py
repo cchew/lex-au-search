@@ -1,9 +1,50 @@
 # tests/test_shell_scripts.py
+import re
+import subprocess
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 SCRIPTS = ROOT / "scripts"
+
+
+def _extract_cudart_find_line(script_name: str) -> str:
+    s = (SCRIPTS / script_name).read_text()
+    for line in s.splitlines():
+        if "libcudart.so.12" in line and "find /" in line:
+            return line.strip()
+    raise AssertionError(f"no libcudart find line in {script_name}")
+
+
+def _assert_survives_under_set_e_pipefail(line: str, tmp_path: Path) -> None:
+    """Real failure 2026-10-13: a live Colab run died silently (exit 1, zero
+    output) at exactly this line. `find /` as root almost always exits
+    non-zero scanning permission-denied entries (/proc, /sys, etc) even
+    with 2>/dev/null suppressing the *messages* - under `pipefail`, that
+    propagates through `| head -1` into the assignment, and `set -e` kills
+    the whole script right there. Reproduces the exact mechanism (not just
+    greps for `|| true`) with an unreadable subdirectory, without scanning
+    the real filesystem."""
+    unreadable = tmp_path / "noperm"
+    unreadable.mkdir()
+    unreadable.chmod(0o000)
+    try:
+        scoped_line = re.sub(r"find /(?!tmp)", f"find {tmp_path}", line, count=1)
+        result = subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\n{scoped_line}\necho SURVIVED"],
+            capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        unreadable.chmod(0o755)
+    assert "SURVIVED" in result.stdout, (result.returncode, result.stdout, result.stderr)
+
+
+def test_setup_gpu_env_cudart_find_survives_permission_denied_entries(tmp_path):
+    _assert_survives_under_set_e_pipefail(_extract_cudart_find_line("setup_gpu_env.sh"), tmp_path)
+
+
+def test_colab_ingest_cudart_find_survives_permission_denied_entries(tmp_path):
+    _assert_survives_under_set_e_pipefail(_extract_cudart_find_line("colab_ingest.sh"), tmp_path)
 
 
 def test_setup_gpu_env_has_the_env_level_steps():

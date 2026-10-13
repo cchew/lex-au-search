@@ -40,7 +40,16 @@ pip install "nvidia-cudnn-cu12>=9,<10"
 # this particular library. Find it and export its directory; a system-wide
 # install (if one exists) is found just as well, so this is a no-op where
 # the library was already resolvable.
-cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)"
+# `|| true` matters: `find /` as root almost always exits non-zero from
+# permission-denied entries under /proc, /sys etc (2>/dev/null only
+# suppresses the *messages*, not the exit code) - with `pipefail` above,
+# that non-zero propagates through `| head -1` into this assignment, and
+# `set -e` then kills the whole script right here, silently, with zero
+# output. Confirmed live 2026-10-13 on a real Colab run: setup_gpu_env.sh
+# died at exactly this line with no error message at all, recorded exit
+# code 1. `head -1` already got whatever it needed from the pipe before
+# find's own later permission errors occur, so this is safe either way.
+cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)" || true
 if [ -n "$cudart_path" ]; then
   export LD_LIBRARY_PATH="$(dirname "$cudart_path"):${LD_LIBRARY_PATH:-}"
 fi

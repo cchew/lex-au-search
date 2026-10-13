@@ -26,7 +26,9 @@ pip install "nvidia-cudnn-cu12>=9,<10"
 # cuDNN/cuBLAS resolving fine - see setup_gpu_env.sh's identical fix for the
 # full explanation (this script duplicates that install block rather than
 # calling it).
-cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)"
+# `|| true` matters here too - see setup_gpu_env.sh's identical fix/comment
+# for why a bare `find /` under `set -e pipefail` dies silently otherwise.
+cudart_path="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)" || true
 if [ -n "$cudart_path" ]; then
   export LD_LIBRARY_PATH="$(dirname "$cudart_path"):${LD_LIBRARY_PATH:-}"
 fi
