@@ -82,7 +82,15 @@ def _request(method: str, path: str, body: dict | None = None) -> tuple[int, dic
     req = urllib.request.Request(
         API_BASE + path,
         method=method,
-        headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+            # Cloudflare's bot detection in front of rest.runpod.io blocks a
+            # User-Agent-less request outright with HTTP 403 "error code:
+            # 1010" -- confirmed live 2026-10-13. urllib sends none by
+            # default.
+            "User-Agent": "lex-au-search-runpod-driver/1.0",
+        },
         data=json.dumps(body).encode() if body is not None else None,
     )
     try:

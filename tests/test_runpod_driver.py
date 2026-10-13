@@ -97,9 +97,11 @@ class _FakeHTTP:
     def __init__(self, responses):
         self._responses = list(responses)  # each: (status, body_dict) or Exception
         self.calls = []
+        self.requests = []
 
     def __call__(self, req, timeout=None):
         self.calls.append((req.get_method(), req.full_url))
+        self.requests.append(req)
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -163,6 +165,18 @@ def test_get_status_reports_terminated_on_404(monkeypatch):
     err = urllib.error.HTTPError(rd.API_BASE + "/pods/p", 404, "gone", {}, io.BytesIO(b"{}"))
     _patch_http(monkeypatch, _FakeHTTP([err]))
     assert rd.get_status("p") == "TERMINATED"
+
+
+def test_request_sends_a_user_agent(monkeypatch):
+    # Real failure 2026-10-13: RunPod's REST API (Cloudflare-fronted) returns
+    # HTTP 403 "error code: 1010" (Cloudflare's own bot-detection block) for
+    # any request with no User-Agent header -- which is what urllib sends by
+    # default. Every _request call needs one, not just list_pods.
+    fake = _FakeHTTP([(200, {})])
+    _patch_http(monkeypatch, fake)
+    rd._request("GET", "/pods")
+    ua = fake.requests[0].get_header("User-agent")
+    assert ua, "no User-Agent header sent"
 
 
 def test_request_swallows_urlerror_and_timeout(monkeypatch):
