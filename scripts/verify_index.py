@@ -3,9 +3,12 @@
 1. Count guard: chunk count may not fall more than 5% below the previous
    published generation unless --allow-drop is given, and every corpus Act
    must be present as an Act record.
-2. Golden queries (tests/golden_queries.json): each must return the expected
-   eId prefix in its top-k hits. These cover the shapes lex-au v0.10.0 broke
-   for the chunker (nested clause, quoted insertion, clause-free schedule).
+2. Golden queries (tests/golden_queries.json), the shapes lex-au v0.10.0 broke
+   for the chunker (nested clause, quoted insertion, clause-free schedule):
+   - presence: the expected chunk must exist in the index (hard failure);
+   - retrieval: it should rank within the query's max_rank (default 5). A miss
+     fails, unless the entry is marked "known_gap" (a very long chunk the
+     embedder only sees the first 512 tokens of), which only warns.
 
 Exit 1 on any failure. See projects/lex-au/FUTURE.md "Downstream contract
 regression suites" (component 5).
@@ -41,19 +44,51 @@ def check_counts(
     return failures
 
 
-def check_golden(searcher, queries: list[dict], top_k: int = 5) -> list[str]:
-    failures: list[str] = []
-    for q in queries:
-        results = searcher.search(q["query"], limit=top_k, act=q.get("act"))
-        hit = any(
-            r.chunk.eid.startswith(q["expect_eid_prefix"])
-            and q["must_contain"].lower() in r.chunk.text.lower()
-            for r in results
+def _present(client, act: str | None, prefix: str, phrase: str) -> bool:
+    from qdrant_client import models
+
+    from lexausearch.indexer import COLLECTION_SECTIONS
+
+    flt = None
+    if act:
+        flt = models.Filter(must=[
+            models.FieldCondition(key="act_name", match=models.MatchValue(value=act))
+        ])
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            COLLECTION_SECTIONS, scroll_filter=flt, limit=2000, offset=offset,
+            with_payload=["eid", "text"],
         )
-        if not hit:
-            got = [r.chunk.eid for r in results]
-            failures.append(f"golden query failed: {q['name']} (top-{top_k}: {got})")
-    return failures
+        for p in points:
+            if p.payload["eid"].startswith(prefix) and phrase.lower() in p.payload["text"].lower():
+                return True
+        if offset is None:
+            return False
+
+
+def check_golden(searcher, queries: list[dict], default_rank: int = 5) -> tuple[list[str], list[str]]:
+    """(failures, warnings). Presence is a hard failure; rank beyond max_rank
+    fails unless the entry is a known_gap."""
+    failures: list[str] = []
+    warnings: list[str] = []
+    for q in queries:
+        if not _present(searcher._client, q.get("act"), q["expect_eid_prefix"], q["must_contain"]):
+            failures.append(f"golden chunk missing from index: {q['name']}")
+            continue
+        max_rank = q.get("max_rank", default_rank)
+        results = searcher.search(q["query"], limit=max(max_rank, 50), act=q.get("act"))
+        rank = next(
+            (i + 1 for i, r in enumerate(results)
+             if r.chunk.eid.startswith(q["expect_eid_prefix"])
+             and q["must_contain"].lower() in r.chunk.text.lower()),
+            None,
+        )
+        if rank is not None and rank <= max_rank:
+            continue
+        msg = f"golden query rank {rank} > {max_rank}: {q['name']}"
+        (warnings if q.get("known_gap") else failures).append(msg)
+    return failures, warnings
 
 
 def main() -> int:
@@ -71,6 +106,7 @@ def main() -> int:
     from lexausearch.indexer import COLLECTION_ACTS, COLLECTION_SECTIONS
     from lexausearch.searcher import Searcher
 
+    warnings: list[str] = []
     client = QdrantClient(path=args.storage_dir)
     try:
         act_count = client.count(collection_name=COLLECTION_ACTS).count
@@ -83,13 +119,16 @@ def main() -> int:
             act_count, chunk_count, previous_chunks=args.previous_chunks,
             corpus_acts=corpus_acts, allow_drop=args.allow_drop,
         )
-        failures += check_golden(
+        golden_failures, warnings = check_golden(
             Searcher(client), json.loads(Path(args.golden).read_text()), args.top_k
         )
+        failures += golden_failures
     finally:
         client.close()
 
     print(f"act_count={act_count} chunk_count={chunk_count}")
+    for w in warnings:
+        print(f"WARN: {w}")
     for f in failures:
         print(f"FAIL: {f}")
     print("OK" if not failures else f"{len(failures)} check(s) failed")

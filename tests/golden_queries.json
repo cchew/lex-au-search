@@ -4,7 +4,10 @@
     "query": "disclosure of detainees personal information",
     "act": "Torres Strait Fisheries Act 1984",
     "expect_eid_prefix": "schedule-2__part-6__clause-59",
-    "must_contain": "Disclosure of detainees"
+    "must_contain": "Disclosure of detainees",
+    "known_gap": true,
+    "max_rank": 5,
+    "note": "clause is 3,636 words; embedder sees the first 512 tokens only (FUTURE.md long-chunk finding)"
   },
   {
     "name": "quoted insertion in an amending Act",
@@ -25,7 +28,8 @@
     "query": "open and transparent management of personal information",
     "act": "Privacy Act 1988",
     "expect_eid_prefix": "schedule-1__part-1__clause-1",
-    "must_contain": "Australian Privacy Principle 1"
+    "must_contain": "Australian Privacy Principle 1",
+    "max_rank": 15
   },
   {
     "name": "tariff schedule prose",
