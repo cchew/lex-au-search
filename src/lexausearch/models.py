@@ -11,7 +11,7 @@ class Chunk:
     frbr_uri: str
     eid: str
     provision_num: str        # "16" for sections; "3(1)" for subsections; "1" or "1.1" for schedule clauses
-    provision_type: str       # "section", "subsection", or "schedule_clause"
+    provision_type: str       # "section", "subsection", "schedule_clause", or "schedule_text"
     heading: str | None
     text: str
     refs: list[str] = field(default_factory=list)
@@ -70,6 +70,10 @@ def format_results(results: list[SearchResult]) -> str:
         if c.provision_type == "schedule_clause":
             sched_num = _schedule_num_from_eid(c.eid)
             citation = f"{c.act_name} {year} Sch {sched_num} cl {c.provision_num}"
+        elif c.provision_type == "schedule_text":
+            sched_num = _schedule_num_from_eid(c.eid)
+            suffix = f" {c.provision_num}" if c.provision_num else ""
+            citation = f"{c.act_name} {year} Sch {sched_num}{suffix}"
         else:
             citation = f"{c.act_name} {year} s {c.provision_num}"
         heading_line = f"\n{c.heading}" if c.heading else ""

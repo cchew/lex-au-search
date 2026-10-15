@@ -124,38 +124,260 @@ def _extract_subsections(
     return chunks
 
 
+_SCHEDULE_CHUNK_MAX_WORDS = 400
+# Windows packed by a child already carry its context prefix; allow that slack so a
+# parent never re-cuts them mid-paragraph.
+_SCHEDULE_CHUNK_SLACK_WORDS = 100
+
+
+def _local(el: etree._Element) -> str:
+    return el.tag.split("}")[-1] if isinstance(el.tag, str) and "}" in el.tag else str(el.tag)
+
+
+def _is_schedule_clause(el: etree._Element) -> bool:
+    return el.tag == f"{AKN}hcontainer" and el.get("name") == "clause"
+
+
+def _is_chunked_in_attachment(el: etree._Element) -> bool:
+    """True for elements that already become a section, subsection or clause chunk.
+
+    Mirrors _extract_sections/_extract_subsections/_extract_schedule_clauses so
+    the schedule-text pass only picks up what those three leave out.
+    """
+    if el.tag == f"{AKN}section" or _is_schedule_clause(el):
+        return True
+    if el.tag == f"{AKN}subsection":
+        return len(" ".join(_element_text(el).split())) >= 20
+    return False
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+def _window_words(text: str, prefix: str) -> list[str]:
+    words = text.split()
+    limit = _SCHEDULE_CHUNK_MAX_WORDS
+    return [
+        (prefix + " " if i and prefix else "") + " ".join(words[i : i + limit])
+        for i in range(0, len(words), limit)
+    ]
+
+
+def _pack_texts(parts: list[str], prefix: str) -> list[str]:
+    """Greedily join consecutive texts into windows of at most the word cap.
+
+    A single part above the cap is split on word boundaries.
+    """
+    windows: list[str] = []
+    current: list[str] = []
+    count = 0
+    for part in parts:
+        n = _words(part)
+        if n > _SCHEDULE_CHUNK_MAX_WORDS + _SCHEDULE_CHUNK_SLACK_WORDS:
+            if current:
+                windows.append(" ".join(current))
+                current, count = [], 0
+            windows.extend(_window_words(part, prefix))
+            continue
+        if current and count + n > _SCHEDULE_CHUNK_MAX_WORDS:
+            windows.append(" ".join(current))
+            current, count = [], 0
+        current.append(part)
+        count += n
+    if current:
+        windows.append(" ".join(current))
+    return [(prefix + " " + w) if i and prefix else w for i, w in enumerate(windows)]
+
+
+_BLOCK_TAGS = frozenset({
+    "hcontainer", "paragraph", "subparagraph", "subsection", "section", "content",
+    "p", "table", "tr", "td", "th", "blockList", "item", "list", "quotedStructure",
+    "heading", "num", "intro", "wrapUp", "blockContainer", "tblock", "mod", "container",
+})
+
+
+def _split_subtree(node: etree._Element) -> list[str]:
+    """Text units for a subtree with no chunked descendant, capped in size.
+
+    An oversized node is split along its block children, keeping its own text
+    and the text between children. A node whose children are all inline markup
+    is split on word boundaries instead.
+    """
+    text = " ".join(_element_text(node).split())
+    if _words(text) <= _SCHEDULE_CHUNK_MAX_WORDS:
+        return [text] if text else []
+    children = [c for c in node if isinstance(c.tag, str)]
+    prefix = _context(node)
+    if not any(_local(c) in _BLOCK_TAGS for c in children):
+        return _window_words(text, prefix)
+    parts: list[str] = []
+    if node.text and node.text.strip():
+        parts.append(" ".join(node.text.split()))
+    for child in children:
+        parts.extend(_split_subtree(child))
+        if child.tail and child.tail.strip():
+            parts.append(" ".join(child.tail.split()))
+    return _pack_texts(parts, prefix)
+
+
+def _context(node: etree._Element) -> str:
+    bits = []
+    for tag in ("num", "heading"):
+        el = node.find(f"{AKN}{tag}")
+        if el is not None:
+            t = " ".join("".join(el.itertext()).split())
+            if t:
+                bits.append(t)
+    return " ".join(bits)
+
+
+def _nearest_eid(node: etree._Element) -> str:
+    cur: etree._Element | None = node
+    while cur is not None:
+        eid = cur.get("eId")
+        if eid:
+            return eid
+        cur = cur.getparent()
+    return ""
+
+
+def _schedule_text_units(
+    attachment: etree._Element,
+) -> list[tuple[etree._Element, str, str]]:
+    """(node, text, eid_suffix) for attachment content no other pass chunks."""
+    covered: set[etree._Element] = set()
+    holds_chunked: set[etree._Element] = set()
+    for el in attachment.iter():
+        if not isinstance(el.tag, str) or not _is_chunked_in_attachment(el):
+            continue
+        covered.add(el)
+        anc = el.getparent()
+        while anc is not None and anc is not attachment.getparent() and anc not in holds_chunked:
+            holds_chunked.add(anc)
+            anc = anc.getparent()
+
+    units: list[tuple[etree._Element, str, str]] = []
+    outline: list[tuple[etree._Element, str]] = []
+
+    def walk(node: etree._Element) -> None:
+        children = [c for c in node if isinstance(c.tag, str)]
+        if node not in holds_chunked:
+            for i, text in enumerate(_split_subtree(node)):
+                units.append((node, text, f"#t{i}" if i else ""))
+            return
+        residual = [
+            c for c in children
+            if c not in covered and c not in holds_chunked
+            and _local(c) not in ("num", "heading")
+        ]
+        parts = [t for c in residual for t in _split_subtree(c)]
+        header = _context(node)
+        if header and not parts:
+            outline.append((node, header))
+        for i, text in enumerate(_pack_texts(parts, header)):
+            full = text if (i or not header) else f"{header} {text}"
+            units.append((node, full, f"#r{i}"))
+        for c in children:
+            if c in holds_chunked and c not in covered:
+                walk(c)
+
+    for child in attachment:
+        if isinstance(child.tag, str) and child not in covered:
+            outline.clear()
+            walk(child)
+            labels = [label for _, label in outline]
+            for i, text in enumerate(_pack_texts(labels, "")):
+                units.append((child, text, f"#outline{i}"))
+    return units
+
+
 def _extract_schedule_clauses(
     root: etree._Element,
     frbr_uri: str,
     act_name: str,
     corpus_index: dict[str, str],
 ) -> list[Chunk]:
-    # lxml findall requires './/'-prefixed paths; bare '//' is not supported.
-    schedule_clause_xpath = (
-        f".//{AKN}attachments/{AKN}attachment"
-        f"/{AKN}hcontainer[@name='schedule']"
-        f"/{AKN}hcontainer[@name='clause']"
-    )
+    """Schedule chunks: every clause at any depth, plus schedule text no
+    section/subsection/clause chunk covers (amendment items, part/division
+    lead-in text, tables and prose in clause-less schedules).
+
+    lex-au v0.10.0 nests schedules as schedule > part > division > clause and
+    amending Acts as schedule > amendedAct > item > quotedStructure, so a
+    direct-child clause match alone dropped ~7M words of schedule text.
+    """
     chunks: list[Chunk] = []
-    for clause in root.findall(schedule_clause_xpath):
-        eid = clause.get("eId", "")
-        num_el = clause.find(f"{AKN}num")
-        heading_el = clause.find(f"{AKN}heading")
-        # Builder emits bare digit/decimal (e.g. "1", "1.1"), not "APP 1"
-        provision_num = num_el.text.strip() if num_el is not None and num_el.text else ""
-        heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
-        text = " ".join(_element_text(clause).split())
-        chunks.append(Chunk(
-            act_name=act_name,
-            frbr_uri=frbr_uri,
-            eid=eid,
-            provision_num=provision_num,
-            provision_type="schedule_clause",
-            heading=heading,
-            text=text,
-            refs=extract_refs(text, corpus_index),
-        ))
+    for attachment in root.iter(f"{AKN}attachment"):
+        for clause in attachment.iter(f"{AKN}hcontainer"):
+            if not _is_schedule_clause(clause):
+                continue
+            eid = clause.get("eId", "")
+            num_el = clause.find(f"{AKN}num")
+            heading_el = clause.find(f"{AKN}heading")
+            # Builder emits bare digit/decimal (e.g. "1", "1.1"), not "APP 1"
+            provision_num = num_el.text.strip() if num_el is not None and num_el.text else ""
+            heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
+            text = " ".join(_element_text(clause).split())
+            chunks.append(Chunk(
+                act_name=act_name,
+                frbr_uri=frbr_uri,
+                eid=eid,
+                provision_num=provision_num,
+                provision_type="schedule_clause",
+                heading=heading,
+                text=text,
+                refs=extract_refs(text, corpus_index),
+            ))
+        for node, text, suffix in _schedule_text_units(attachment):
+            if not any(ch.isalpha() for ch in text):
+                continue
+            num_el = node.find(f"{AKN}num")
+            heading_el = node.find(f"{AKN}heading")
+            chunks.append(Chunk(
+                act_name=act_name,
+                frbr_uri=frbr_uri,
+                eid=f"{_nearest_eid(node)}{suffix}",
+                provision_num=(
+                    " ".join("".join(num_el.itertext()).split()) if num_el is not None else ""
+                ),
+                provision_type="schedule_text",
+                heading=(
+                    " ".join("".join(heading_el.itertext()).split())
+                    if heading_el is not None else None
+                ) or None,
+                text=text,
+                refs=extract_refs(text, corpus_index),
+            ))
     return chunks
+
+
+_SCHEDULE_GAP_MIN_WORDS = 500
+_SCHEDULE_GAP_MIN_RATIO = 0.5
+
+
+def _warn_on_schedule_gap(
+    root: etree._Element, act_name: str, chunks: list[Chunk]
+) -> None:
+    """Warn when an Act's attachments hold far more text than its chunks reach.
+
+    Catches the next schema change that hides schedule content from the
+    extractors, instead of letting it show up as a silent coverage drop. Chunk
+    words are an upper bound (nested chunks overlap), so a low ratio is a real gap.
+    """
+    attachment_words = sum(
+        _words(" ".join(_element_text(a).split()))
+        for a in root.iter(f"{AKN}attachment")
+    )
+    if attachment_words < _SCHEDULE_GAP_MIN_WORDS:
+        return
+    covered_words = sum(
+        _words(c.text) for c in chunks if c.eid.startswith("schedule-")
+    )
+    if covered_words < attachment_words * _SCHEDULE_GAP_MIN_RATIO:
+        logger.warning(
+            f"{act_name}: schedule coverage gap - {covered_words} chunked words "
+            f"vs {attachment_words} attachment words"
+        )
 
 
 def chunk_xml(
@@ -175,6 +397,7 @@ def chunk_xml(
     subsections = _extract_subsections(root, frbr_uri, act_name, corpus_index)
     clauses = _extract_schedule_clauses(root, frbr_uri, act_name, corpus_index)
     chunks = sections + subsections + clauses
+    _warn_on_schedule_gap(root, act_name, chunks)
     logger.info(
         f"{act_name}: {len(sections)} sections, {len(subsections)} subsections, {len(clauses)} schedule clauses"
     )

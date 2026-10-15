@@ -70,9 +70,11 @@ def _run_ingest(
     sections = [c for c in chunks if c.provision_type == "section"]
     subsections = [c for c in chunks if c.provision_type == "subsection"]
     clauses = [c for c in chunks if c.provision_type == "schedule_clause"]
+    sched_text = [c for c in chunks if c.provision_type == "schedule_text"]
     click.echo(
         f"  {len(sections)} sections + {len(subsections)} subsections "
-        f"+ {len(clauses)} schedule clauses = {len(chunks)} total chunks across all Acts."
+        f"+ {len(clauses)} schedule clauses + {len(sched_text)} schedule text units "
+        f"= {len(chunks)} total chunks across all Acts."
     )
 
     # Build ActRecord list from chunk list
