@@ -1,0 +1,37 @@
+[
+  {
+    "name": "nested schedule clause (Torres Strait, part/division wrapper)",
+    "query": "disclosure of detainees personal information",
+    "act": "Torres Strait Fisheries Act 1984",
+    "expect_eid_prefix": "schedule-2__part-6__clause-59",
+    "must_contain": "Disclosure of detainees"
+  },
+  {
+    "name": "quoted insertion in an amending Act",
+    "query": "modern award must include a default fund term",
+    "act": "Fair Work Amendment Act 2012",
+    "expect_eid_prefix": "schedule-1__amdact-1__item-19__qstr-1__sec-149C",
+    "must_contain": "default fund term"
+  },
+  {
+    "name": "clause-free schedule (FOI exempt agencies)",
+    "query": "exempt agencies Aboriginal Land Councils and Land Trusts",
+    "act": "Freedom of Information Act 1982",
+    "expect_eid_prefix": "schedule-2",
+    "must_contain": "Aboriginal Land Councils and Land Trusts"
+  },
+  {
+    "name": "flat schedule clause (APP 1)",
+    "query": "open and transparent management of personal information",
+    "act": "Privacy Act 1988",
+    "expect_eid_prefix": "schedule-1__part-1__clause-1",
+    "must_contain": "Australian Privacy Principle 1"
+  },
+  {
+    "name": "tariff schedule prose",
+    "query": "nitrogen-function compounds",
+    "act": "Customs Tariff Act 1995",
+    "expect_eid_prefix": "schedule-2",
+    "must_contain": "Nitrogen-function"
+  }
+]

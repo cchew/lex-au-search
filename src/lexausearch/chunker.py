@@ -124,6 +124,34 @@ def _extract_subsections(
     return chunks
 
 
+# lex-au index.json "structure_version" values this chunker has been tested
+# against (lex-au corpus.py STRUCTURE_VERSION): 1 flat schedules, 2 nested
+# part/division/clause and amendedAct/item/quotedStructure. An unknown value
+# means lex-au changed shape again; refuse rather than silently drop content.
+SUPPORTED_STRUCTURE_VERSIONS = frozenset({1, 2})
+
+
+class UnsupportedCorpusStructure(RuntimeError):
+    pass
+
+
+def check_structure_version(index: dict) -> None:
+    version = index.get("structure_version")
+    if version is None:
+        logger.warning(
+            "corpus index.json has no structure_version (pre-2026-10-15 lex-au export); "
+            "assuming a supported shape"
+        )
+        return
+    if version not in SUPPORTED_STRUCTURE_VERSIONS:
+        raise UnsupportedCorpusStructure(
+            f"corpus structure_version {version!r} is not supported by this chunker "
+            f"(supported: {sorted(SUPPORTED_STRUCTURE_VERSIONS)}). lex-au changed the AKN "
+            "shape; update and re-test the chunker (tests/test_chunker_schedule_coverage.py) "
+            "before ingesting."
+        )
+
+
 _SCHEDULE_CHUNK_MAX_WORDS = 400
 # Windows packed by a child already carry its context prefix; allow that slack so a
 # parent never re-cuts them mid-paragraph.
@@ -445,6 +473,7 @@ def chunk_corpus_for_acts(corpus_dir: Path, act_names: set[str]) -> list[Chunk]:
     shard still resolve correctly."""
     index_path = corpus_dir / "index.json"
     index = json.loads(index_path.read_text())
+    check_structure_version(index)
     corpus_index = {
         entry["name"]: entry.get("frbr_expression_uri", "")
         for entry in index["acts"].values()
@@ -484,6 +513,7 @@ def compute_act_content_hashes(
 def chunk_corpus(corpus_dir: Path) -> list[Chunk]:
     index_path = corpus_dir / "index.json"
     index = json.loads(index_path.read_text())
+    check_structure_version(index)
     # Build corpus_index for cross-Act ref resolution
     corpus_index = {
         entry["name"]: entry.get("frbr_expression_uri", "")
