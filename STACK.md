@@ -10,12 +10,12 @@ Corpus:       lex-au         — AKN 3.0 XML corpus (this repo)
 Retrieval:    lex-au-search  — hybrid search API + MCP
               lex-au-graph   — cross-reference graph + definition resolution
 Applications: ClauseKit       — rule extraction JSON (obligation/trigger/threshold/penalty)
-              term-comparison — definition-comparison bot (IM2026 entry)
+              Act Alike       — term comparison across Acts (formerly term-comparison)
 ```
 
 All four downstream repos consume lex-au's AKN XML corpus. `lex-au-search` and
 `lex-au-graph` are peers at the retrieval layer — neither supersedes the other, they
-answer different questions (see below). `ClauseKit` and `term-comparison` are peers at
+answer different questions (see below). `ClauseKit` and `Act Alike` are peers at
 the applications layer — both are consumer-facing tools built on the retrieval layer,
 not on each other.
 
@@ -23,7 +23,7 @@ not on each other.
 - lex-au-search: https://github.com/cchew/lex-au-search
 - lex-au-graph: https://github.com/cchew/lex-au-graph
 - ClauseKit: https://github.com/cchew/clause-kit
-- term-comparison: IM2026 "Build a Bureaucrat Bot" entry, not yet public
+- Act Alike: https://github.com/cchew/act-alike (formerly term-comparison; started as an IM2026 "Build a Bureaucrat Bot" entry)
 
 ## Which tool to call
 
@@ -33,7 +33,7 @@ not on each other.
 | "What does term X mean?" / cross-Act definition chains | `lex-au-graph`'s `resolve_definition` / `find_all_definitions` MCP tool | `lex-au-search` alone — it matches on semantic similarity and can return the wrong Act's use of a homonymous term |
 | "Give me the full text of Act X" | `lex-au-search`'s `get_act_sections`, filtered | `get_act_text` — full-Act dumps exceed most context windows for large Acts (Corporations Act, Migration Act, Income Tax Assessment Act) |
 | "Does this fact pattern trigger an obligation?" | `ClauseKit`'s rule JSON, if the Act/domain has been extracted | raw section text — check ClauseKit's `rules/` directory first |
-| "Does this term mean the same thing everywhere?" | `term-comparison` | — |
+| "Does this term mean the same thing everywhere?" | `Act Alike` | — |
 
 ## Precedence rule
 
