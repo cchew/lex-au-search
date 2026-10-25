@@ -29,6 +29,40 @@ def test_missing_acts_fail():
     assert verify_index.check_counts(3000, 540_000, previous_chunks=None, corpus_acts=3085)
 
 
+def test_schedule_num_check_flags_empty_and_missing(tmp_path):
+    from lexausearch.indexer import COLLECTION_SECTIONS
+    from qdrant_client import QdrantClient, models
+
+    client = QdrantClient(path=str(tmp_path))
+    client.create_collection(COLLECTION_SECTIONS, vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
+    rows = [
+        {"provision_type": "schedule_text", "eid": "schedule-1", "act_name": "A", "schedule_num": "1"},
+        {"provision_type": "schedule_text", "eid": "schedule-2", "act_name": "A", "schedule_num": ""},
+        {"provision_type": "schedule_clause", "eid": "schedule-3__clause-1", "act_name": "A"},
+        {"provision_type": "section", "eid": "sec-1", "act_name": "A"},
+    ]
+    client.upsert(COLLECTION_SECTIONS, [
+        models.PointStruct(id=i + 1, vector=[1.0, 0.0], payload=r) for i, r in enumerate(rows)
+    ])
+    fails = verify_index.check_schedule_nums(client)
+    client.close()
+    assert len(fails) == 1 and fails[0].startswith("2 schedule chunk(s)")
+    assert "schedule-2" in fails[0] and "sec-1" not in fails[0]
+
+
+def test_schedule_num_check_passes_when_all_present(tmp_path):
+    from lexausearch.indexer import COLLECTION_SECTIONS
+    from qdrant_client import QdrantClient, models
+
+    client = QdrantClient(path=str(tmp_path))
+    client.create_collection(COLLECTION_SECTIONS, vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
+    client.upsert(COLLECTION_SECTIONS, [models.PointStruct(
+        id=1, vector=[1.0, 0.0],
+        payload={"provision_type": "schedule_text", "eid": "schedule-1", "act_name": "A", "schedule_num": "1"})])
+    assert verify_index.check_schedule_nums(client) == []
+    client.close()
+
+
 class _FakeSearcher:
     """Stands in for Searcher: `present` is the set of chunk texts indexed,
     `ranked` the eIds returned for any query."""

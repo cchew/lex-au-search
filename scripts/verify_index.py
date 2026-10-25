@@ -10,6 +10,10 @@
      fails, unless the entry is marked "known_gap" (a very long chunk the
      embedder only sees the first 512 tokens of), which only warns.
 
+3. Schedule payload: every schedule_text/schedule_clause chunk must carry a
+   non-empty schedule_num, so an index built from a pre-a28cf4d checkout
+   cannot pass the gate.
+
 Exit 1 on any failure. See projects/lex-au/FUTURE.md "Downstream contract
 regression suites" (component 5).
 """
@@ -42,6 +46,42 @@ def check_counts(
     if corpus_acts is not None and act_count < corpus_acts:
         failures.append(f"act_count {act_count} < corpus Acts {corpus_acts}")
     return failures
+
+
+def check_schedule_nums(client, collection: str | None = None) -> list[str]:
+    """Fail when any schedule chunk has an empty or missing schedule_num."""
+    from qdrant_client import models
+
+    if collection is None:
+        from lexausearch.indexer import COLLECTION_SECTIONS as collection
+
+    flt = models.Filter(must=[
+        models.FieldCondition(
+            key="provision_type",
+            match=models.MatchAny(any=["schedule_text", "schedule_clause"]),
+        )
+    ])
+    bad = 0
+    samples: list[str] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection, scroll_filter=flt, limit=5000, offset=offset,
+            with_payload=["eid", "act_name", "schedule_num"],
+        )
+        for p in points:
+            if not (p.payload or {}).get("schedule_num"):
+                bad += 1
+                if len(samples) < 5:
+                    samples.append(f"{p.payload.get('act_name')} {p.payload.get('eid')}")
+        if offset is None:
+            break
+    if not bad:
+        return []
+    return [
+        f"{bad} schedule chunk(s) have empty/missing schedule_num (index built from a "
+        f"pre-a28cf4d checkout?); e.g. {'; '.join(samples)}"
+    ]
 
 
 def _present(client, act: str | None, prefix: str, phrase: str) -> bool:
@@ -123,6 +163,7 @@ def main() -> int:
             Searcher(client), json.loads(Path(args.golden).read_text()), args.top_k
         )
         failures += golden_failures
+        failures += check_schedule_nums(client)
     finally:
         client.close()
 

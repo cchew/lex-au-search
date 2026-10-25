@@ -138,9 +138,24 @@ def test_split_schedule_level_text_drops_eid_suffix():
     assert _cite(c) == f"{ACT} 1920 Sch 9A"
 
 
-def test_legacy_payload_without_schedule_num_uses_ordinal_without_suffix():
+def test_legacy_schedule_level_payload_falls_back_to_provision_num():
     c = _sched(eid="schedule-10#t1", provision_num="9A", provision_type="schedule_text")
+    assert _cite(c) == f"{ACT} 1920 Sch 9A"
+
+
+def test_legacy_schedule_level_without_provision_num_uses_ordinal():
+    c = _sched(eid="schedule-10", provision_num="", provision_type="schedule_text")
     assert _cite(c) == f"{ACT} 1920 Sch 10"
+
+
+def test_legacy_part_level_payload_uses_ordinal_not_provision_num():
+    c = _sched(eid="schedule-3__part-2#r0", provision_num="2", provision_type="schedule_text")
+    assert _cite(c) == f"{ACT} 1920 Sch 3 2"
+
+
+def test_legacy_clause_payload_keeps_ordinal_fallback():
+    c = _sched(eid="schedule-3__clause-1", provision_num="1", provision_type="schedule_clause")
+    assert _cite(c) == f"{ACT} 1920 Sch 3 cl 1"
 
 
 def test_part_within_schedule_keeps_part_suffix():

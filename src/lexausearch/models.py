@@ -80,9 +80,15 @@ def format_results(results: list[SearchResult]) -> str:
             sched_num = c.schedule_num or _schedule_num_from_eid(c.eid)
             citation = f"{c.act_name} {year} Sch {sched_num} cl {c.provision_num}"
         elif c.provision_type == "schedule_text":
-            sched_num = c.schedule_num or _schedule_num_from_eid(c.eid)
+            level = _is_schedule_level(c.eid)
+            # Old indexes lack schedule_num; a schedule node's own <num> is its label.
+            sched_num = (
+                c.schedule_num
+                or (c.provision_num if level else "")
+                or _schedule_num_from_eid(c.eid)
+            )
             # A schedule-level node's own <num> is the schedule number; don't repeat it.
-            show = c.provision_num and not _is_schedule_level(c.eid)
+            show = c.provision_num and not level
             suffix = f" {c.provision_num}" if show else ""
             citation = f"{c.act_name} {year} Sch {sched_num}{suffix}"
         else:
