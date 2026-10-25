@@ -96,6 +96,7 @@ class Searcher:
                     heading=hit.payload.get("heading"),
                     text=hit.payload["text"],
                     refs=hit.payload.get("refs", []),
+                    schedule_num=hit.payload.get("schedule_num", ""),
                 ),
                 score=hit.score,
             )

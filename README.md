@@ -263,6 +263,7 @@ Response:
       "eid": "part-III__sec-16",
       "provision_num": "16",
       "provision_type": "section",
+      "schedule_num": "",
       "heading": "Interference with privacy of an individual",
       "text": "...",
       "refs": [],
@@ -271,6 +272,8 @@ Response:
   ]
 }
 ```
+
+`schedule_num` is the printed Schedule number from the schedule's `<num>` (e.g. `"2A"`), which can differ from the positional number in the eId (`schedule-3`). It falls back to the eId number for unnumbered schedules and is `""` for body provisions and for indexes built before this field existed.
 
 ## Known limits
 

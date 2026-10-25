@@ -45,6 +45,7 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
                     "eid": r.chunk.eid,
                     "provision_num": r.chunk.provision_num,
                     "provision_type": r.chunk.provision_type,
+                    "schedule_num": r.chunk.schedule_num,
                     "heading": r.chunk.heading,
                     "text": r.chunk.text,
                     "refs": [ref for ref in r.chunk.refs if not ref.startswith("unresolved:")],
@@ -112,6 +113,7 @@ def create_app(searcher: Searcher, client: QdrantClient) -> FastAPI:
                     "eid": p.payload["eid"],
                     "provision_num": p.payload["provision_num"],
                     "provision_type": p.payload["provision_type"],
+                    "schedule_num": p.payload.get("schedule_num", ""),
                     "heading": p.payload.get("heading"),
                     "text": p.payload["text"],
                 }

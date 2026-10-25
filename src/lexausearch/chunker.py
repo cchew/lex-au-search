@@ -336,6 +336,7 @@ def _extract_schedule_clauses(
     """
     chunks: list[Chunk] = []
     for attachment in root.iter(f"{AKN}attachment"):
+        schedule_num = _attachment_schedule_num(attachment)
         for clause in attachment.iter(f"{AKN}hcontainer"):
             if not _is_schedule_clause(clause):
                 continue
@@ -355,6 +356,7 @@ def _extract_schedule_clauses(
                 heading=heading,
                 text=text,
                 refs=extract_refs(text, corpus_index),
+                schedule_num=schedule_num,
             ))
         for node, text, suffix in _schedule_text_units(attachment):
             if not any(ch.isalpha() for ch in text):
@@ -375,8 +377,28 @@ def _extract_schedule_clauses(
                 ) or None,
                 text=text,
                 refs=extract_refs(text, corpus_index),
+                schedule_num=schedule_num,
             ))
     return chunks
+
+
+def _attachment_schedule_num(attachment: etree._Element) -> str:
+    """Printed Schedule number ("2A") from the schedule node's <num>.
+
+    eIds are positional (an Act's Schedules 1, 2, 2A are schedule-1..3), so
+    citations must not use them. Falls back to the eId ordinal only when the
+    schedule has no <num> (unnumbered Dictionary schedules).
+    """
+    for node in attachment:
+        if not isinstance(node.tag, str):
+            continue
+        eid = node.get("eId", "")
+        if not eid.startswith("schedule-"):
+            continue
+        num_el = node.find(f"{AKN}num")
+        num = " ".join("".join(num_el.itertext()).split()) if num_el is not None else ""
+        return num or eid[len("schedule-"):].split("__")[0]
+    return ""
 
 
 _SCHEDULE_GAP_MIN_WORDS = 500

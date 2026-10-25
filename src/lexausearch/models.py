@@ -16,6 +16,9 @@ class Chunk:
     text: str
     refs: list[str] = field(default_factory=list)
     terms: list[str] = field(default_factory=list)  # AKN <TLCTerm> eIds, e.g. "term-personal-information"
+    # Printed Schedule number from the schedule's <num> ("2A"), or the eId ordinal
+    # when <num> is missing; "" for body chunks. Payload only, never embedded.
+    schedule_num: str = ""
 
 
 @dataclass
@@ -42,10 +45,16 @@ class SearchResult:
 
 
 def _schedule_num_from_eid(eid: str) -> str:
-    for part in eid.split("__"):
+    """eId ordinal fallback for payloads indexed before schedule_num existed."""
+    for part in eid.split("#", 1)[0].split("__"):
         if part.startswith("schedule-"):
             return part[len("schedule-"):]
     return "?"
+
+
+def _is_schedule_level(eid: str) -> bool:
+    """True when the chunk is the schedule node itself (eId has no child path)."""
+    return "__" not in eid.split("#", 1)[0]
 
 
 def _as_at_from_frbr_uri(frbr_uri: str) -> str:
@@ -68,11 +77,13 @@ def format_results(results: list[SearchResult]) -> str:
         year = _year_from_frbr_uri(c.frbr_uri)
         as_at = _as_at_from_frbr_uri(c.frbr_uri)
         if c.provision_type == "schedule_clause":
-            sched_num = _schedule_num_from_eid(c.eid)
+            sched_num = c.schedule_num or _schedule_num_from_eid(c.eid)
             citation = f"{c.act_name} {year} Sch {sched_num} cl {c.provision_num}"
         elif c.provision_type == "schedule_text":
-            sched_num = _schedule_num_from_eid(c.eid)
-            suffix = f" {c.provision_num}" if c.provision_num else ""
+            sched_num = c.schedule_num or _schedule_num_from_eid(c.eid)
+            # A schedule-level node's own <num> is the schedule number; don't repeat it.
+            show = c.provision_num and not _is_schedule_level(c.eid)
+            suffix = f" {c.provision_num}" if show else ""
             citation = f"{c.act_name} {year} Sch {sched_num}{suffix}"
         else:
             citation = f"{c.act_name} {year} s {c.provision_num}"

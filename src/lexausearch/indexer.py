@@ -139,6 +139,7 @@ class Indexer:
                             "heading": c.heading,
                             "text": c.text,
                             "refs": c.refs,
+                            "schedule_num": c.schedule_num,
                         }
                         for c in sub
                     ],
@@ -198,6 +199,7 @@ class Indexer:
                 "heading": chunk.heading,
                 "text": chunk.text,
                 "refs": chunk.refs,
+                "schedule_num": chunk.schedule_num,
             }
             points.append(qmodels.PointStruct(
                 id=uuid.uuid4().hex,
