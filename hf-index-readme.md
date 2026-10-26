@@ -21,7 +21,7 @@ viewer: false
 
 This is an output of [lex-au-search](https://github.com/cchew/lex-au-search) run against the [lex-au](https://huggingface.co/datasets/cchew/lex-au) corpus. If you want to search AU legislation, download this and point the CLI at it.
 
-**Version: v0.5.0** - 534,335 chunks (sections, subsections, schedule clauses) across 3,073 Act records, embedded with `snowflake/snowflake-arctic-embed-l` (1024-dim, local ONNX, 512-token context). Corpus pinned at [lex-au commit `f0a89da4`](https://huggingface.co/datasets/cchew/lex-au/commit/f0a89da476227b5f3dbb861be1b666d1234ac501) (2026-08-30).
+**Version: v0.7.0, index generation 3** - 553,870 chunks (sections, subsections, schedule clauses, schedule text) across 3,086 Acts, embedded with `snowflake/snowflake-arctic-embed-l` (1024-dim, local ONNX, 512-token context). Corpus pinned at [lex-au commit `ce532dde`](https://huggingface.co/datasets/cchew/lex-au/commit/ce532ddeb514fa477d6466a892fa17e62d21513e) (lex-au v0.13.0 content, 2026-10-26). Built from [embed cache revision `c8a24dfc`](https://huggingface.co/datasets/cchew/lex-au-search-embed-cache/commit/c8a24dfcc04af3ecd703104f0223f1c36832a895). Earlier generations stay reachable by revision: generation 2 (552,305 chunks, 3,085 Acts) is `461bc8aa4ae8bbbe0f0a28fcc5485f1376451f21`.
 
 See [github.com/cchew/lex-au-search](https://github.com/cchew/lex-au-search) for source code, CLI, and MCP server. See [`cchew/lex-au-search-embed-cache`](https://huggingface.co/datasets/cchew/lex-au-search-embed-cache) for the separate raw embedding cache the ingest pipeline itself uses to resume/skip re-embedding.
 
@@ -53,15 +53,17 @@ lex-au-search serve --storage-dir /path/to/downloaded/qdrant_storage
 
 A Qdrant local-mode storage directory (`qdrant_storage/`) with two collections:
 
-- **`legislation`** (3,073 points) - one per Act: `act_name`, `frbr_uri`, `year`, `as_at_date`, `section_count`, `schedule_clause_count`.
-- **`legislation_section`** (534,335 points) - one per chunk: 1024-dim dense vector (`snowflake-arctic-embed-l`) + BM25 sparse vector, payload `act_name`, `frbr_uri`, `eid`, `provision_num`, `provision_type`, `heading`, `text` (full chunk text), `refs` (cross-references).
+- **`legislation`** (3,086 points) - one per Act: `act_name`, `frbr_uri`, `year`, `as_at_date`, `section_count`, `schedule_clause_count`.
+- **`legislation_section`** (553,870 points) - one per chunk: 1024-dim dense vector (`snowflake-arctic-embed-l`) + BM25 sparse vector, payload `act_name`, `frbr_uri`, `eid`, `provision_num`, `provision_type`, `schedule_num` (the schedule's printed number, e.g. `3A`, on schedule chunks), `heading`, `text` (full chunk text), `refs` (cross-references).
 
 On-disk size ~6.4 GB, dominated by `legislation_section` (vectors + full section text payload).
 
 ## Known limits
 
-- 9 of the source corpus's 3,082 Acts are absent: two Constitution Alteration referendum Acts (1906, 1909) and seven old amendment/repeal-only Acts whose AKN XML doesn't fit the `<section>`-based body shape the chunker extracts from, so they chunk to zero content. All are spent/minor Acts with no operative text of real search value - see [lex-au-search's FUTURE.md](https://github.com/cchew/lex-au-search/blob/main/FUTURE.md) for the full list.
-- Qdrant's local/embedded mode keeps the full vector set resident in RAM and has no ANN index, so `QdrantClient(path=...)` construction itself is slow at this scale (multiple minutes to open, 534K+ points) - expected, not a bug. Fine for local CLI/MCP use; not suited to serving concurrent requests.
+- Dense embeddings see only a chunk's first 512 tokens, so very long chunks (about 1,200 exceed 2,000 words) rank poorly even for verbatim queries.
+- Dictionary Schedules (e.g. Criminal Code Schedule 1) are cut into 400-word windows, not one chunk per definition, so a single definition can rank low and cannot be cited on its own.
+- Schedule clauses that repeat the same criterion text across visa subclasses (Migration Regulations Schedule 2) are hard to tell apart unless the query names the subclass.
+- Qdrant's local/embedded mode keeps the full vector set resident in RAM and has no ANN index, so `QdrantClient(path=...)` construction itself is slow at this scale (multiple minutes to open, 550K+ points) - expected, not a bug. Fine for local CLI/MCP use; not suited to serving concurrent requests.
 - No hosted search endpoint exists for this index - it's a downloadable artifact, not a live service.
 
 ## Licence
