@@ -126,9 +126,10 @@ def _extract_subsections(
 
 # lex-au index.json "structure_version" values this chunker has been tested
 # against (lex-au corpus.py STRUCTURE_VERSION): 1 flat schedules, 2 nested
-# part/division/clause and amendedAct/item/quotedStructure. An unknown value
+# part/division/clause and amendedAct/item/quotedStructure, 3 (i)/(ii) nested as
+# subparagraph and restarted lists scoped `lstN`. An unknown value
 # means lex-au changed shape again; refuse rather than silently drop content.
-SUPPORTED_STRUCTURE_VERSIONS = frozenset({1, 2})
+SUPPORTED_STRUCTURE_VERSIONS = frozenset({1, 2, 3})
 
 
 class UnsupportedCorpusStructure(RuntimeError):
