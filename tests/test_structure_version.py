@@ -24,8 +24,8 @@ def test_supported_versions_pass(version):
 
 
 def test_unknown_version_is_refused():
-    with pytest.raises(UnsupportedCorpusStructure, match="structure_version 4"):
-        check_structure_version({"structure_version": 4})
+    with pytest.raises(UnsupportedCorpusStructure, match="structure_version 9"):
+        check_structure_version({"structure_version": 9})
 
 
 def test_missing_version_warns_but_proceeds(caplog):
