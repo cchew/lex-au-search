@@ -13,7 +13,7 @@ Chunk text is mostly unchanged, so the cache should hit for nearly every chunk. 
 - A Colab runtime with a GPU **and High-RAM** (24 GB or more). The full collection lives in memory during ingest. The script refuses to continue below 24 GB.
 - A Hugging Face **write** token for the lex-au-search repos (`HF_CACHE_WRITE_TOKEN` in `projects/lex-au-search/repo/.env`), added as a Colab secret named `HF_TOKEN` (key icon in the left bar, notebook access on). Only the publish step uses it. Do not paste it into a cell.
 - Pinned inputs:
-  - `CORPUS_REV` = `f826b65a95fb266fcec82f6fab4e84c9c0d0804c` (cchew/lex-au, lex-au v0.16.0, structure version 4)
+  - `CORPUS_REV` = `e5469362dad81f7c4a8e72f4a3909be64d398818` (cchew/lex-au, lex-au v0.16.1, structure version 4)
   - Previous index: generation 4, 554,750 chunks, 3,087 Acts
 
 ## Steps
@@ -26,7 +26,7 @@ Each block is one Colab cell.
 !git clone https://github.com/cchew/lex-au-search.git
 %cd lex-au-search
 import os
-os.environ["CORPUS_REV"] = "f826b65a95fb266fcec82f6fab4e84c9c0d0804c"
+os.environ["CORPUS_REV"] = "e5469362dad81f7c4a8e72f4a3909be64d398818"
 !bash scripts/colab_reingest.sh setup
 ```
 
