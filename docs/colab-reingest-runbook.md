@@ -1,95 +1,69 @@
-# Manual full re-ingest on Colab
+# Re-ingest the search index with a Colab GPU
 
-Rebuilds the published index (`cchew/lex-au-search-index`) from the current lex-au corpus on one Colab GPU runtime, using the published embedding cache so almost nothing is re-embedded. You run each step and check the output before moving on. Nothing is published until the last step.
+The index is `cchew/lex-au-search-index`; the embedding cache is `cchew/lex-au-search-embed-cache`. Two routes, depending on the Colab runtime you have.
 
-## Why a full re-ingest
+## Route A (use this): warm the cache on Colab, build the index on the laptop
 
-lex-au v0.16.0 changed the eIds in most Acts (schedule nesting, list scoping, TOC removal), so nearly every Act's content hash differs from index generation 4. `ingest-delta` would re-index almost everything anyway, and it has to load the whole existing index into RAM first. A fresh `ingest` from the published embedding cache is simpler and leaves no stale points.
+A standard free runtime (about 12 GB RAM, T4 GPU) is enough, because Colab never holds the index. It only embeds texts that are missing from the cache and uploads the cache. The laptop (64 GB RAM) then builds the index with every embedding already cached.
 
-Chunk text is mostly unchanged, so the cache should hit for nearly every chunk. Expect the run to be dominated by chunking and Qdrant upserts, not embedding.
+Needed for this run: about **24,600 texts** to embed (6,129 from the corpus change plus 18,452 tail windows for long provisions). On a T4 that should take roughly 10 to 30 minutes.
 
-## What you need
+### What you need
 
-- A Colab runtime with a GPU **and High-RAM** (24 GB or more). The full collection lives in memory during ingest. The script refuses to continue below 24 GB.
-- A Hugging Face **write** token for the lex-au-search repos (`HF_CACHE_WRITE_TOKEN` in `projects/lex-au-search/repo/.env`), added as a Colab secret named `HF_TOKEN` (key icon in the left bar, notebook access on). Only the publish step uses it. Do not paste it into a cell.
-- Pinned inputs:
-  - `CORPUS_REV` = `e5469362dad81f7c4a8e72f4a3909be64d398818` (cchew/lex-au, lex-au v0.16.1, structure version 4)
-  - Previous index: generation 4, 554,750 chunks, 3,087 Acts
+- A Colab notebook with a **GPU** runtime (Runtime > Change runtime type > T4 GPU). High-RAM is not needed.
+- A Colab secret named `HF_TOKEN` (key icon in the left bar, notebook access on), whose value is `HF_CACHE_WRITE_TOKEN` from `projects/lex-au-search/repo/.env`. Only the last step uses it. Do not paste the token into a cell.
+- `CORPUS_REV` = `bda7e6632ab9f9becf800e883210ba7ffc08df5c` (cchew/lex-au, corpus v0.16.1; the XML is identical to `e5469362`, the later commit only removed unused files).
 
-## Steps
+### Cells, one per block
 
-Each block is one Colab cell.
-
-**1. Clone and set up (about 5 minutes)**
+**1. Clone and set up the GPU (about 5 minutes)**
 
 ```python
 !git clone https://github.com/cchew/lex-au-search.git
 %cd lex-au-search
 import os
-os.environ["CORPUS_REV"] = "e5469362dad81f7c4a8e72f4a3909be64d398818"
-!bash scripts/colab_reingest.sh setup
+os.environ["CORPUS_REV"] = "bda7e6632ab9f9becf800e883210ba7ffc08df5c"
+!bash scripts/colab_reingest.sh setup-gpu
 ```
 
-Expect `RAM: ... GB` (24 or more) and a GPU check that prints a CUDA provider. If the GPU check fails or RAM is low, stop and change the runtime; do not continue on CPU.
+Expect a CUDA GPU check to pass. If it fails, stop and change the runtime; do not continue on CPU.
 
-**2. Fetch the corpus and the embedding cache (about 10 minutes)**
+**2. Fetch the corpus and the cache (about 10 minutes)**
 
 ```python
 !bash scripts/colab_reingest.sh fetch
 ```
 
-Expect: `corpus: 3087 Acts in index, 3087 xml files, structure_version 4` and `embed_cache.db` of about 2.9 GB. If it prints `NOTE: head has moved`, someone published to cchew/lex-au after this runbook was written. Check what changed before going on.
+Expect `corpus: 3087 Acts in index, 3087 xml files, structure_version 4` and `embed_cache.db` of about 2.9 GB.
 
-**3. Ingest in the background, then watch the log**
+**3. Embed the missing texts, in the background**
 
 ```python
-!nohup bash scripts/colab_reingest.sh ingest > ingest.log 2>&1 &
+!nohup bash scripts/colab_reingest.sh warm > warm.log 2>&1 &
 ```
 
 ```python
-!tail -n 5 ingest.log; free -g | head -2; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv
+!tail -n 6 warm.log; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv
 ```
 
-Re-run the second cell to check progress. Keep the browser tab open; an idle or closed tab can end the session. The log ends with `ingest end <time>`. If the session dies, start again from step 1: Qdrant storage is not resumable, but the cache (re-downloaded in step 2) makes the retry fast.
+Re-run the second cell to watch. First it prints `NNN cache hits, ~24600 distinct misses to embed`, then `[done/total] embedded + cached` lines. It ends with `Done. N chunk(s) embedded and written to ./embed_cache.db.` and `warm end <time>`. If the hit/miss line shows far more than about 25,000 misses, stop and tell me: the corpus or chunker is not what I measured.
 
-If RAM climbs toward the limit, stop and use the sharded path (`scripts/run_sharded_ingest.py`, which I can drive from the laptop).
+If the session drops, start again from step 1. Already-embedded texts are only kept if the run finished, so a restart repeats the work, but it is short.
 
-**4. Verify (about 5 minutes)**
-
-```python
-!bash scripts/colab_reingest.sh verify
-```
-
-This prints `act_count` and `chunk_count`, then runs the golden-query gate. It must end `verify OK. Nothing has been published.`
-
-Check by eye before going on:
-
-- `act_count=3087`.
-- `chunk_count` close to 554,750 (the gate fails below a 5% drop). A rise is plausible; a large rise is not.
-- No `FAIL` lines.
-
-**5. Publish (only if step 4 is clean)**
+**4. Upload the warmed cache**
 
 ```python
 from google.colab import userdata
 os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
-!bash scripts/colab_reingest.sh publish
+!bash scripts/colab_reingest.sh push-cache
 ```
 
-This pushes the index as generation 5 (generation-guarded; a different embedding model would be refused) and uploads the updated `embed_cache.db`.
+Expect `embed cache uploaded`. Then tell me. The laptop does the rest: download the cache, build the index (all cache hits), run the verify gate, and publish after your go-ahead.
+
+## Route B: whole ingest on one High-RAM Colab runtime
+
+Needs Colab Pro (24 GB or more RAM), because the whole collection is held in memory during ingest. Steps: `setup` (checks RAM), `fetch`, `ingest` (in the background), `verify`, `publish`, using the same script and `CORPUS_REV`. The `setup` step refuses to run below 24 GB. Use Route A unless you have a High-RAM runtime and a reason.
 
 ## Rollback
 
-Everything is versioned on HF. To go back to generation 4:
-
-- Index: `cchew/lex-au-search-index` at commit `2c58405a073f0c8fe9618e723fe0519845de6422` (data) and `dd949158cadb2fe56ca289bd35b6b1329b348759` (catalogue).
-- Embedding cache: `cchew/lex-au-search-embed-cache` at `8f68daf1926faf50a4298107a014e19228dbb9bb`.
-
-Restore by downloading those revisions and re-uploading them as the new head.
-
-## After publishing
-
-Back on the laptop, with the new index in place:
-
-- `python -m lexausearch.hf_cache fetch-index --dest ./hf-index --expect-model snowflake/snowflake-arctic-embed-l`, then `python scripts/verify_index.py --storage-dir ./hf-index/qdrant_storage --corpus-index <corpus>/index.json` as an independent check.
-- Update the README index-generation line (generation 5, chunk and Act counts, corpus v0.16.0).
+Everything is versioned on HF. To go back to the generation 4 index: `cchew/lex-au-search-index` at `2c58405a073f0c8fe9618e723fe0519845de6422` (data) and `dd949158cadb2fe56ca289bd35b6b1329b348759` (catalogue). The embedding cache at `8f68daf1926faf50a4298107a014e19228dbb9bb` is the pre-run version.

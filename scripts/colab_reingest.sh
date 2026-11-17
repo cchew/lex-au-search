@@ -9,6 +9,12 @@
 #   bash scripts/colab_reingest.sh verify    # counts + golden queries gate
 #   bash scripts/colab_reingest.sh publish   # push index + cache to HF (needs HF_TOKEN, write)
 #
+# Cache-warm route (a standard 12 GB runtime is enough; the index is built later on a machine with RAM):
+#   bash scripts/colab_reingest.sh setup-gpu   # GPU env only, no RAM check
+#   bash scripts/colab_reingest.sh fetch       # (as above)
+#   bash scripts/colab_reingest.sh warm        # embed every cache miss into embed_cache.db (background)
+#   bash scripts/colab_reingest.sh push-cache  # upload embed_cache.db to HF (needs HF_TOKEN, write)
+#
 # Env:
 #   CORPUS_REV       required for fetch/verify: full commit sha of cchew/lex-au to ingest
 #   PREVIOUS_CHUNKS  chunk count of the published index, for the 5% drop guard (default 554750)
@@ -42,6 +48,10 @@ case "$step" in
       echo "switch to a High-RAM runtime (Runtime > Change runtime type) or use the sharded path." >&2
       exit 3
     fi
+    bash scripts/setup_gpu_env.sh
+    ;;
+
+  setup-gpu)
     bash scripts/setup_gpu_env.sh
     ;;
 
@@ -92,6 +102,29 @@ PY
     echo "verify OK. Nothing has been published."
     ;;
 
+  warm)
+    [ -d corpus/xml ] && [ -f embed_cache.db ] || { echo "run fetch first" >&2; exit 2; }
+    date -u +"warm start %FT%TZ"
+    python3 scripts/colab_embed_misses.py --corpus-dir corpus/ --cache-path ./embed_cache.db
+    date -u +"warm end   %FT%TZ"
+    ;;
+
+  push-cache)
+    : "${HF_TOKEN:?set HF_TOKEN (write token for the lex-au-search repos)}"
+    [ -f embed_cache.db ] || { echo "no embed_cache.db" >&2; exit 2; }
+    python3 - <<PY
+import os
+from huggingface_hub import HfApi
+
+HfApi(token=os.environ["HF_TOKEN"]).upload_file(
+    path_or_fileobj="embed_cache.db", path_in_repo="embed_cache.db",
+    repo_id="$CACHE_REPO", repo_type="dataset",
+    commit_message="embed cache warmed for tail windows ($CORPUS_REPO@${CORPUS_REV:-unknown})",
+)
+print("embed cache uploaded")
+PY
+    ;;
+
   publish)
     : "${HF_TOKEN:?set HF_TOKEN (write token for the lex-au-search repos)}"
     [ -d qdrant_storage ] || { echo "no qdrant_storage" >&2; exit 2; }
@@ -117,7 +150,7 @@ PY
     ;;
 
   *)
-    sed -n '2,14p' "$0"
+    sed -n '2,24p' "$0"
     exit 2
     ;;
 esac
