@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from lxml import etree
@@ -45,6 +46,48 @@ def _element_text(el: etree._Element) -> str:
     return " ".join(parts)
 
 
+# A provision above this many words keeps its whole-provision chunk and also gets tail windows.
+# The dense model reads only the first ~512 tokens of a chunk, so without them the rest of a long
+# section, subsection or clause could be found by keyword (BM25) only.
+_WINDOW_TRIGGER_WORDS = 500
+
+
+def _residual_parts(node: etree._Element, top: bool = True) -> list[str]:
+    """Text units of `node` that no other chunk covers: its own text and children, minus any
+    descendant that is chunked in its own right (a subsection, a section, a clause)."""
+    if not top and _is_chunked_in_attachment(node):
+        return []
+    holds_chunked = any(
+        isinstance(d.tag, str) and _is_chunked_in_attachment(d) for d in node.iterdescendants()
+    )
+    if not holds_chunked:
+        return _split_subtree(node)
+    parts: list[str] = []
+    if node.text and node.text.strip():
+        parts.append(" ".join(node.text.split()))
+    for child in node:
+        if not isinstance(child.tag, str):
+            continue
+        parts.extend(_residual_parts(child, top=False))
+        if child.tail and child.tail.strip():
+            parts.append(" ".join(child.tail.split()))
+    return parts
+
+
+def _tail_windows(node: etree._Element, whole: Chunk, corpus_index: dict[str, str]) -> list[Chunk]:
+    """Windows `<eId>#w1..` for the part of a long provision the whole-provision chunk's embedding
+    does not reach. Window 0 is the head, which that embedding already covers."""
+    if _words(whole.text) <= _WINDOW_TRIGGER_WORDS:
+        return []
+    windows = _pack_texts(_residual_parts(node), _context(node))
+    out: list[Chunk] = []
+    for i, text in enumerate(windows[1:], start=1):
+        if not any(ch.isalpha() for ch in text):
+            continue
+        out.append(replace(whole, eid=f"{whole.eid}#w{i}", text=text, refs=extract_refs(text, corpus_index)))
+    return out
+
+
 def _extract_sections(
     root: etree._Element,
     frbr_uri: str,
@@ -59,7 +102,7 @@ def _extract_sections(
         provision_num = num_el.text.strip() if num_el is not None and num_el.text else ""
         heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
         text = " ".join(_element_text(section).split())
-        chunks.append(Chunk(
+        whole = Chunk(
             act_name=act_name,
             frbr_uri=frbr_uri,
             eid=eid,
@@ -68,7 +111,9 @@ def _extract_sections(
             heading=heading,
             text=text,
             refs=extract_refs(text, corpus_index),
-        ))
+        )
+        chunks.append(whole)
+        chunks.extend(_tail_windows(section, whole, corpus_index))
     return chunks
 
 
@@ -111,7 +156,7 @@ def _extract_subsections(
         provision_num = f"{sec_num}{subsec_suffix}" if sec_num else subsec_suffix
         heading_el = subsec.find(f"{AKN}heading")
         heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
-        chunks.append(Chunk(
+        whole = Chunk(
             act_name=act_name,
             frbr_uri=frbr_uri,
             eid=eid,
@@ -120,7 +165,9 @@ def _extract_subsections(
             heading=heading,
             text=text,
             refs=extract_refs(text, corpus_index),
-        ))
+        )
+        chunks.append(whole)
+        chunks.extend(_tail_windows(subsec, whole, corpus_index))
     return chunks
 
 
@@ -349,7 +396,7 @@ def _extract_schedule_clauses(
             provision_num = num_el.text.strip() if num_el is not None and num_el.text else ""
             heading = heading_el.text.strip() if heading_el is not None and heading_el.text else None
             text = " ".join(_element_text(clause).split())
-            chunks.append(Chunk(
+            whole = Chunk(
                 act_name=act_name,
                 frbr_uri=frbr_uri,
                 eid=eid,
@@ -359,7 +406,9 @@ def _extract_schedule_clauses(
                 text=text,
                 refs=extract_refs(text, corpus_index),
                 schedule_num=schedule_num,
-            ))
+            )
+            chunks.append(whole)
+            chunks.extend(_tail_windows(clause, whole, corpus_index))
         for node, text, suffix in _schedule_text_units(attachment):
             if not any(ch.isalpha() for ch in text):
                 continue
