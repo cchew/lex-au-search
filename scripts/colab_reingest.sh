@@ -31,6 +31,21 @@ CACHE_REPO="cchew/lex-au-search-embed-cache"
 PREVIOUS_CHUNKS="${PREVIOUS_CHUNKS:-554750}"
 MIN_RAM_GB="${MIN_RAM_GB:-24}"
 
+# onnxruntime's CUDA-12 build needs libcudart.so.12, which pip installs under site-packages but never
+# puts on the loader path. setup_gpu_env.sh exports it for its own shell only, so every step that runs
+# onnxruntime has to find it again (a missing library surfaces as "libcudart.so.12: cannot open shared
+# object file" on import). `|| true`: find exits non-zero on unreadable dirs under /proc.
+cuda_env() {
+  local lib
+  lib="$(find / -name 'libcudart.so.12*' 2>/dev/null | head -1)" || true
+  if [ -n "$lib" ]; then
+    export LD_LIBRARY_PATH="$(dirname "$lib"):${LD_LIBRARY_PATH:-}"
+    echo "CUDA runtime: $lib"
+  else
+    echo "WARNING: libcudart.so.12 not found; onnxruntime will fail to import its CUDA provider" >&2
+  fi
+}
+
 need_rev() {
   : "${CORPUS_REV:?set CORPUS_REV to the full commit sha of $CORPUS_REPO (see the runbook)}"
   case "$CORPUS_REV" in
@@ -86,6 +101,7 @@ PY
 
   ingest)
     [ -d corpus/xml ] && [ -f embed_cache.db ] || { echo "run fetch first" >&2; exit 2; }
+    cuda_env
     rm -rf qdrant_storage
     date -u +"ingest start %FT%TZ"
     lex-au-search ingest --corpus-dir corpus/ --storage-dir ./qdrant_storage --cache-path ./embed_cache.db
@@ -104,6 +120,8 @@ PY
 
   warm)
     [ -d corpus/xml ] && [ -f embed_cache.db ] || { echo "run fetch first" >&2; exit 2; }
+    cuda_env
+    python3 scripts/_verify_gpu.py
     date -u +"warm start %FT%TZ"
     python3 scripts/colab_embed_misses.py --corpus-dir corpus/ --cache-path ./embed_cache.db
     date -u +"warm end   %FT%TZ"
