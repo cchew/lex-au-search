@@ -17,6 +17,7 @@ Full stack map: this repo's [`STACK.md`](STACK.md) and [lex-au's `FUTURE.md`](ht
 
 ## Versions
 
+- **v0.9.0** - Index generation 5 (575,921 chunks, 3,087 Acts) built from lex-au v0.16.1 (structure version 4). A section, subsection or schedule clause over 500 words keeps its whole-provision chunk and gains tail windows `<eId>#wN` (up to 400 words, prefixed with the provision's number and heading) for text no child chunk covers, so the dense model reaches all of it: 18,452 windows across 1,305 Acts. The Torres Strait clause 59 query (3,636-word clause) now ranks 2nd and is no longer a known gap. Known limit: near-identical clauses across Migration Regulations visa subclasses still need the subclass named.
 - **v0.8.0** - Index generation 4 (554,750 chunks, 3,087 Acts) rebuilt against lex-au v0.14.0 via `ingest-delta` (82 Acts re-indexed). Picks up the year-prefixed definition, repeated-Schedule-heading and regulation URI fixes.
 - **v0.7.0** - Index generation 3 (553,870 chunks, 3,086 Acts) rebuilt against lex-au v0.13.0 content. Schedules are cited by their printed number from a new `schedule_num` payload field (`Sch 3A`, not the eId ordinal `Sch 4`); schedule-level citations no longer repeat the number or leak eId suffixes. `scripts/verify_index.py` fails if any schedule chunk lacks `schedule_num`. Dictionary Schedules (Criminal Code, Evidence Act) now have chunks.
 - **v0.6.0** - Chunker covers the nested schedules lex-au v0.10.0 emits: clauses at any depth, new `schedule_text` chunks for amendment items and part/division prose, a per-schedule outline of wrapper headings, and a warning when an Act's attachments outrun its chunks. Refuses a corpus whose `index.json` `structure_version` is unknown. `scripts/verify_index.py` checks chunk-count drop and golden queries before a publish. Merged index rebuilt (552,305 chunks, 3,085 Acts) and round-trips through HF (`fetch-index`/`push-index`) for the manual weekly refresh; the GitHub-Actions auto-refresh was built and reverted (see "Weekly refresh via HF-roundtrip").
@@ -42,7 +43,7 @@ pip install -e ".[dev]"
 
 ## Getting a pre-built index
 
-Skip ingest entirely: [`cchew/lex-au-search-index`](https://huggingface.co/datasets/cchew/lex-au-search-index) on HF is the finished, ready-to-query Qdrant store (554,750 chunks, 3,087 Acts as of v0.7.0, index generation 4).
+Skip ingest entirely: [`cchew/lex-au-search-index`](https://huggingface.co/datasets/cchew/lex-au-search-index) on HF is the finished, ready-to-query Qdrant store (575,921 chunks, 3,087 Acts as of v0.9.0, index generation 5).
 
 ```bash
 python -c "from huggingface_hub import snapshot_download; print(snapshot_download(repo_id='cchew/lex-au-search-index', repo_type='dataset'))"

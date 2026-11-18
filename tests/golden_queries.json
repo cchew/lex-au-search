@@ -5,9 +5,7 @@
     "act": "Torres Strait Fisheries Act 1984",
     "expect_eid_prefix": "schedule-2__part-6__clause-59",
     "must_contain": "Disclosure of detainees",
-    "known_gap": true,
-    "max_rank": 5,
-    "note": "clause is 3,636 words; embedder sees the first 512 tokens only (FUTURE.md long-chunk finding)"
+    "max_rank": 5
   },
   {
     "name": "quoted insertion in an amending Act",
